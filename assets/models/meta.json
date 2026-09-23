@@ -1,0 +1,36 @@
+{
+  "model": "fastconformer-quran-ar",
+  "variant": "onnx-int8-streaming",
+  "base_checkpoint": "mohammed/fastconformer-quran-ar",
+  "vocab_size": 1024,
+  "sample_rate": 16000,
+  "feature_dim": 80,
+  "att_context_size": [
+    128,
+    0
+  ],
+  "self_attention_model": "rel_pos_local_attn",
+  "conv_context": "causal",
+  "decoding": "greedy_search",
+  "runtime": "sherpa-onnx",
+  "metadata": {
+    "vocab_size": "1024",
+    "subsampling_factor": "8",
+    "model_type": "EncDecHybridRNNTCTCBPEModel",
+    "version": "1",
+    "model_author": "NeMo",
+    "comment": "Quranic Arabic FastConformer - only transducer branch exported",
+    "url": "https://huggingface.co/mohammed/fastconformer-quran-ar-onnx-int8",
+    "normalize_type": "",
+    "pred_rnn_layers": "1",
+    "pred_hidden": "640",
+    "window_size": "128",
+    "chunk_shift": "1",
+    "cache_last_channel_dim1": "17",
+    "cache_last_channel_dim2": "70",
+    "cache_last_channel_dim3": "512",
+    "cache_last_time_dim1": "17",
+    "cache_last_time_dim2": "512",
+    "cache_last_time_dim3": "8"
+  }
+}

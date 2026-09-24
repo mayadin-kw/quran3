@@ -1,4 +1,4 @@
-const SHELL = 'quran-shell-v2';
+const SHELL = 'quran-shell-v3';
 const CORE = 'recitation-core';
 const SHELL_FILES = ['index.html', 'css/app.css', 'js/app.js', 'js/download-manager.js', 'data/recitation-assets-manifest.json'];
 self.addEventListener('install', event => {

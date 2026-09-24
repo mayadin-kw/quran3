@@ -3,3 +3,22 @@
 .home-download{width:min(360px,88vw);text-align:center}.home-action{display:flex;align-items:center;justify-content:center;gap:12px}.home-action .primary{width:auto;flex:1}.primary.locked{background:#879b90;box-shadow:none}.download-icon{width:58px;height:58px;min-width:58px;border:1px solid #b7c7b9;border-radius:50%;background:#fffefa;color:#205344;font-size:30px;display:grid;place-items:center}.download-icon[hidden]{display:none}.progress-ring{font-size:13px;font-weight:700;background:radial-gradient(closest-side,#fffefa 77%,transparent 78%),conic-gradient(#27674e var(--progress),#d7dfd6 0)}.verifying-ring{animation:spin 1s linear infinite}.download-status{font-size:14px;color:#667a6d;min-height:22px;margin:12px 0 0}.modal-backdrop{position:fixed;inset:0;z-index:30;background:#15312775;display:grid;place-items:center;padding:22px;animation:fadein .2s ease}@keyframes fadein{from{opacity:0}to{opacity:1}}.download-modal{width:min(100%,390px);max-height:calc(100dvh - 32px);overflow:auto;background:#fffefa;border-radius:26px;padding:24px;box-shadow:0 20px 70px #0e2b2a40;text-align:center;animation:rise .25s ease}@keyframes rise{from{transform:translateY(12px)}to{transform:translateY(0)}}.modal-icon{width:55px;height:55px;border-radius:50%;display:grid;place-items:center;margin:0 auto 12px;background:#e9eee7;color:#205344;font-size:29px}.download-modal h2{font-size:24px;margin:0 0 8px}.download-modal p{color:#68796f;line-height:1.6;margin:0 0 18px}.modal-facts{background:#f6f3eb;border-radius:16px;padding:4px 15px;margin:18px 0;display:grid}.modal-facts>div{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:50px}.modal-facts>div+div{border-top:1px solid #dfdfd3}.modal-facts span{color:#708077;font-size:14px}.modal-facts strong{font-size:16px}.download-modal .primary{width:100%;font-size:17px}.modal-later{background:none;border:0;color:#527566;min-height:46px;width:100%;margin-top:7px}
 .modal-spinner{width:46px;height:46px;border:3px solid #d9e2d9;border-top-color:#205344;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}
 .page-shell{width:100%}.mushaf-page{max-width:95%;background:#fffdf7}.mushaf-page [data-type="text"][id^="md-word-"]{visibility:visible}.mushaf-page [data-type="text"][id^="md-word-"].is-hidden{visibility:hidden}
+.page-shell{direction:ltr;display:flex;align-items:center;justify-content:center}
+.mushaf-page{direction:ltr;margin-inline:auto;flex:none;aspect-ratio:382.68 / 547.09}
+.calibration{align-items:center;gap:12px}
+.calibration .back{width:min(100%,520px)}
+.calibration-content{width:min(100%,520px);margin:auto;display:flex;flex-direction:column;align-items:center;text-align:center;gap:18px}
+.calibration-content h1{font-size:clamp(28px,6vw,36px);margin:0}
+.calibration-content p{margin:0;color:#527566}
+.calibration-basmala{font-family:"Noto Naskh Arabic","Geeza Pro",serif;font-size:clamp(28px,7vw,43px);color:#19372f;line-height:1.8;background:#fffdf7;border:1px solid #e0d3ad;border-radius:20px;width:100%;padding:17px 10px}
+.mic-meter{width:100%;direction:ltr;margin:12px 0 0}
+.mic-meter-track{position:relative;height:27px;border-radius:16px;overflow:visible;background:linear-gradient(90deg,#f0d6d4 0 30%,#f5e8c9 30% 60%,#d8eadb 60% 100%);border:1px solid #d9d6c9}
+.mic-meter-fill{height:100%;width:0;border-radius:16px;background:linear-gradient(90deg,#c85954,#d4a449 55%,#258453);transition:width .12s ease}
+.mic-meter-marker{position:absolute;top:-7px;bottom:-7px;width:3px;background:#214e41;box-shadow:0 0 0 2px #fffdf7;left:50%}
+.mic-meter-labels{position:relative;display:flex;justify-content:space-between;font-size:13px;color:#698073;margin-top:11px}
+.mic-meter-labels #required-label{position:absolute;left:50%;transform:translateX(-50%);white-space:nowrap;font-weight:700;color:#205344}
+.calibration-message{min-height:25px;font-size:17px;font-weight:600}
+.calibration-stage{font-size:14px}
+.calibration-check{width:46px;height:46px;border-radius:50%;background:#2b955c;color:white;display:grid;place-items:center;font-size:29px;animation:rise .3s ease}
+.calibration-check[hidden]{display:none}
+.calibration-content .primary{width:100%}

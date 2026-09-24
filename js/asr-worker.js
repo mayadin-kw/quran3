@@ -1,6 +1,8 @@
 /* Quran FastConformer RNNT inference. Audio stays in this browser. */
-let encoder, decoder, vocabulary, running = false, busy = false;
-let audio = new Float32Array(0), lastInferenceLength = 0, lastSoundAt = 0;
+let encoder, decoder, vocabulary, running = false;
+let segment = null, preRoll = new Float32Array(0), hotBlocks = 0, coldBlocks = 0;
+let segmentId = 0, generation = 0, partialPending = false;
+let inferenceQueue = Promise.resolve(), lastSoundAt = 0, vadThreshold = .006;
 const RATE = 16000, HOP = 160, FFT_SIZE = 512, WINDOW = 400, BLANK = 1024;
 
 function stage(label) { self.postMessage({ type: 'stage', label }); }
@@ -98,6 +100,7 @@ async function infer(pcm) {
   let state1 = new ort.Tensor('float32', new Float32Array(640), [1, 1, 640]);
   let state2 = new ort.Tensor('float32', new Float32Array(640), [1, 1, 640]);
   let target = BLANK;
+  let scoreSum = 0, scoreCount = 0;
   for (let frame = 0; frame < count; frame++) {
     const vector = new Float32Array(512);
     for (let channel = 0; channel < 512; channel++) vector[channel] = signal.data[channel * count + frame];
@@ -113,21 +116,78 @@ async function infer(pcm) {
       let best = 0;
       for (let i = 1; i < logits.length; i++) if (logits[i] > logits[best]) best = i;
       if (best === BLANK) break;
+      let runnerUp = -Infinity;
+      for (let i = 0; i < logits.length; i++) if (i !== best && logits[i] > runnerUp) runnerUp = logits[i];
+      scoreSum += 1 / (1 + Math.exp(-(logits[best] - runnerUp)));
+      scoreCount++;
       ids.push(best); target = best;
       state1 = result[decoder.outputNames[2]];
       state2 = result[decoder.outputNames[3]];
     }
   }
-  self.postMessage({type:'hypothesis', text:decodeTokens(ids), latency:Math.round(performance.now() - start)});
+  return {text:decodeTokens(ids), acousticScore:scoreCount ? scoreSum / scoreCount : 0,
+    latency:Math.round(performance.now() - start)};
 }
-async function pump() {
-  if (busy || !running || audio.length < RATE * .75 || audio.length - lastInferenceLength < RATE * .35) return;
-  busy = true; lastInferenceLength = audio.length;
-  const excerpt = audio.slice(Math.max(0, audio.length - RATE * 3.2));
-  try { await infer(excerpt); }
-  catch (error) { self.postMessage({type:'recoverable', message:error.message}); }
-  busy = false;
-  if (audio.length > RATE * 5) { audio = audio.slice(-RATE * 4); lastInferenceLength = audio.length - RATE * .5; }
+function append(a, b, limit = RATE * 12) {
+  const length = Math.min(limit, a.length + b.length);
+  const next = new Float32Array(length);
+  const fromA = Math.min(a.length, length - b.length);
+  next.set(a.subarray(a.length-fromA), 0);
+  next.set(b, fromA);
+  return next;
+}
+function queueInference(samples, details, partial = false) {
+  if (partial && partialPending) return;
+  if (partial) partialPending = true;
+  const expectedGeneration = generation;
+  const task = inferenceQueue.then(() => infer(samples));
+  inferenceQueue = task.catch(() => {});
+  task.then(result => {
+    if (expectedGeneration !== generation || !running) return;
+    self.postMessage({type:'hypothesis', ...details, ...result});
+  }).catch(error => self.postMessage({type:'recoverable', message:error.message}))
+    .finally(() => { if (partial) partialPending = false; });
+}
+function finishSegment() {
+  if (!segment) return;
+  const current = segment; segment = null; coldBlocks = 0; hotBlocks = 0;
+  if (current.samples.length < RATE * .4) return;
+  const endAt = Date.now();
+  queueInference(current.samples, {phase:'final', segmentId:current.id,
+    startAt:current.startAt, endAt, durationMs:endAt-current.startAt});
+}
+function receivePcm(pcm) {
+  let power = 0, peak = 0;
+  for (const value of pcm) { power += value*value; peak = Math.max(peak, Math.abs(value)); }
+  const rms = Math.sqrt(power / pcm.length);
+  const speech = rms >= vadThreshold;
+  if (speech) lastSoundAt = Date.now();
+  self.postMessage({type:'level', rms, peak, sampleRate:RATE,
+    vadState:segment ? (speech ? 'speech' : 'speech-ending') : (speech ? 'possible-speech' : 'silence'),
+    silent:Date.now()-lastSoundAt>7000});
+  preRoll = append(preRoll, pcm, RATE * .3);
+  if (!segment) {
+    hotBlocks = speech ? hotBlocks + 1 : 0;
+    if (hotBlocks >= 2) {
+      segment = {id:++segmentId, startAt:Date.now()-Math.round(preRoll.length/RATE*1000),
+        samples:preRoll, lastPartialLength:0};
+      coldBlocks = 0;
+    }
+    return;
+  }
+  segment.samples = append(segment.samples, pcm);
+  coldBlocks = speech ? 0 : coldBlocks + 1;
+  if (segment.samples.length >= RATE*.85 &&
+      segment.samples.length-segment.lastPartialLength >= RATE*.75 && speech) {
+    segment.lastPartialLength = segment.samples.length;
+    queueInference(segment.samples.slice(), {phase:'partial', segmentId:segment.id,
+      startAt:segment.startAt, endAt:Date.now()}, true);
+  }
+  if (coldBlocks >= 5 || segment.samples.length >= RATE*11.5) finishSegment();
+}
+function resetAudio() {
+  generation++; segment = null; preRoll = new Float32Array(0);
+  hotBlocks = 0; coldBlocks = 0; lastSoundAt = 0;
 }
 self.onmessage = async ({data}) => {
   try {
@@ -147,16 +207,12 @@ self.onmessage = async ({data}) => {
       encoder = await ort.InferenceSession.create(new Uint8Array(encoderBytes), {executionProviders:['wasm']});
       decoder = await ort.InferenceSession.create(new Uint8Array(decoderBytes), {executionProviders:['wasm']});
       self.postMessage({type:'ready'});
-    } else if (data.type === 'start') { running = true; }
-    else if (data.type === 'stop') { running = false; audio = new Float32Array(0); }
-    else if (data.type === 'pcm' && running) {
-      const pcm = data.pcm;
-      const next = new Float32Array(audio.length + pcm.length); next.set(audio); next.set(pcm, audio.length); audio = next;
-      let sum = 0; for (const v of pcm) sum += v * v;
-      const rms = Math.sqrt(sum / pcm.length);
-      if (rms > .008) lastSoundAt = Date.now();
-      self.postMessage({type:'level', rms, sampleRate:RATE, silent:Date.now() - lastSoundAt > 7000});
-      if (rms > .005 || Date.now() - lastSoundAt < 800) pump();
+    } else if (data.type === 'start') { resetAudio(); running = true; }
+    else if (data.type === 'configure') {
+      if (Number.isFinite(data.vadThreshold)) vadThreshold = Math.max(.002, Math.min(.08, data.vadThreshold));
     }
+    else if (data.type === 'reset') { resetAudio(); }
+    else if (data.type === 'stop') { running = false; resetAudio(); }
+    else if (data.type === 'pcm' && running) receivePcm(data.pcm);
   } catch (error) { self.postMessage({type:'error', message:error.message || String(error)}); }
 };

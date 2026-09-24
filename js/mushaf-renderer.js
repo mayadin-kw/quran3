@@ -1,4 +1,6 @@
 const SVG_NS = 'http://www.w3.org/2000/svg';
+export const MUSHAF_CANONICAL_VIEWBOX = '0 0 382.68 547.09';
+export const MUSHAF_FRAME = Object.freeze({x:7.5, y:7.5, width:367.68, height:532.09});
 export const MUSHAF_SOURCE = 'https://cdn.jsdelivr.net/gh/mushafdatabase/MushafDatabase-Ligature-Based-SVG@ae5786ab08597f8123575dec4e774f1eca195e0f/SVG%20V1.01/';
 export const mushafPageUrl = page => `${MUSHAF_SOURCE}${String(page).padStart(3, '0')}.svg`;
 const element = (name, attributes = {}) => {
@@ -49,7 +51,7 @@ function decorate(svg, page) {
 
   const frame = element('g', {'class':'mushaf-frame', 'aria-hidden':'true', fill:'none'});
   frame.append(
-    element('rect', {x:7.5, y:7.5, width:367.68, height:532.09, rx:5, stroke:'#695c41', 'stroke-width':'1.5'}),
+    element('rect', {...MUSHAF_FRAME, rx:5, stroke:'#695c41', 'stroke-width':'1.5'}),
     element('rect', {x:12, y:12, width:358.68, height:523.09, rx:3, stroke:'#c3ad75', 'stroke-width':'.8'}),
     element('rect', {x:17, y:17, width:348.68, height:513.09, rx:1, stroke:'#8f7a4e', 'stroke-width':'.65'}),
     element('path', {d:'M 17 39 Q 17 17 39 17 M 344 17 Q 365 17 365 39 M 17 508 Q 17 530 39 530 M 344 530 Q 365 530 365 508', stroke:'#b79e69', 'stroke-width':'1.1'}),
@@ -74,6 +76,10 @@ export class MushafRenderer {
     if (doc.querySelector('parsererror')) throw Error('ملف المصحف غير صالح');
     const svg = document.importNode(doc.documentElement, true);
     svg.removeAttribute('width'); svg.removeAttribute('height');
+    svg.setAttribute('viewBox', MUSHAF_CANONICAL_VIEWBOX);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    if (typeof location !== 'undefined' && !new URLSearchParams(location.search).has('debug'))
+      svg.querySelector(':scope > title')?.remove();
     this.container.replaceChildren(svg);
     decorate(svg, page);
     this.nodes.clear(); this.page = page;

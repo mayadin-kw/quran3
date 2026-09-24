@@ -1,4 +1,4 @@
-import {loadQuran, selectedWords, normalizeWord} from './quran-data.js';
+import {loadQuran, selectedWords} from './quran-data.js';
 import {MushafRenderer} from './mushaf-renderer.js';
 import {requestMicrophone, Microphone} from './microphone.js';
 import {BrowserFastConformerProvider} from './asr-engine.js';
@@ -6,15 +6,20 @@ import {RecitationEngine} from './recitation-engine.js';
 import {buildReport} from './report-engine.js';
 import {saveReport} from './firebase.js';
 import {downloadManager, formatBytes, formatEta} from './download-manager.js';
+import {TranscriptGate} from './transcript-gate.js';
+import {MicrophoneCalibration} from './calibration.js';
 
 const root = document.getElementById('app');
 const debug = new URLSearchParams(location.search).has('debug');
+const debugState = {};
 let data, stream, microphone, provider, engine, renderer, session, report;
+let calibration, calibrationData, transcriptGate, mode = 'idle';
+let configuredVad = null;
 let homeUnsubscribe;
 let modalUnsubscribe;
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const arabic = value => new Intl.NumberFormat('ar').format(value);
-function debugInfo(values) { if (!debug) return; let node = document.querySelector('.debug'); if (!node) { node = document.createElement('pre'); node.className = 'debug'; document.body.append(node); } node.textContent = JSON.stringify(values, null, 2); }
+function debugInfo(values) { if (!debug) return; Object.assign(debugState, values); let node = document.querySelector('.debug'); if (!node) { node = document.createElement('pre'); node.className = 'debug'; document.body.append(node); } node.textContent = JSON.stringify(debugState, null, 2); }
 function home() {
   homeUnsubscribe?.();
   root.innerHTML = `<section class="screen home"><div class="emblem" aria-hidden="true">۞</div><h1>القرآن الكريم</h1>
@@ -104,8 +109,7 @@ async function setup() {
   root.innerHTML = `<section class="screen setup"><button class="back" id="back-home">رجوع</button><h1>إعداد التسميع</h1>
     <label class="field">السورة<select id="surah">${options}</select></label>
     <div class="range"><label class="field">من آية<select id="from"></select></label><label class="field">إلى آية<select id="to"></select></label></div>
-    <div class="spacer"></div><label class="mic-row"><span><strong>تفعيل الميكروفون</strong><small id="mic-note">مطلوب لبدء التسميع</small></span><input class="switch" type="checkbox" id="mic-switch" aria-label="تفعيل الميكروفون"></label>
-    <div id="setup-error" class="message" role="alert"></div><button class="primary" id="start" disabled>بدء التسميع</button></section>`;
+    <div class="spacer"></div><div id="setup-error" class="message" role="alert"></div><button class="primary" id="next">التالي</button></section>`;
   const surah = document.getElementById('surah'), from = document.getElementById('from'), to = document.getElementById('to');
   function ayahOptions() {
     const count = data.surahs[surah.value].verses;
@@ -115,83 +119,153 @@ async function setup() {
   surah.onchange = ayahOptions; ayahOptions();
   from.onchange = () => { if (+to.value < +from.value) to.value = from.value; };
   to.onchange = () => { if (+to.value < +from.value) to.value = from.value; };
-  document.getElementById('back-home').onclick = async () => { stream?.getTracks().forEach(t => t.stop()); stream = null; home(); };
-  const control = document.getElementById('mic-switch');
-  control.onchange = async () => {
-    const message = document.getElementById('setup-error'); message.textContent = '';
-    if (!control.checked) { stream?.getTracks().forEach(t => t.stop()); stream = null; document.getElementById('start').disabled = true; document.getElementById('mic-note').textContent = 'مطلوب لبدء التسميع'; return; }
-    try {
-      stream = await requestMicrophone();
-      document.getElementById('start').disabled = false;
-      document.getElementById('mic-note').textContent = 'الميكروفون جاهز';
-      stream.getAudioTracks()[0].onended = () => { document.getElementById('start').disabled = true; control.checked = false; message.textContent = 'انقطع اتصال الميكروفون'; };
-    } catch(error) { control.checked = false; message.textContent = error.name === 'NotAllowedError' ? 'يرجى السماح باستخدام الميكروفون من إعدادات المتصفح' : error.message || 'تعذر الوصول إلى الميكروفون'; }
+  document.getElementById('back-home').onclick = home;
+  document.getElementById('next').onclick = async () => {
+    const button = document.getElementById('next'); button.disabled = true;
+    try { await openCalibration(+surah.value, +from.value, +to.value); }
+    catch (error) {
+      if (error.name === 'AbortError') return;
+      await cleanup();
+      errorScreen(error.name === 'NotAllowedError' ? Error('يرجى السماح باستخدام الميكروفون') : error, setup);
+    }
   };
-  document.getElementById('start').onclick = () => begin(+surah.value, +from.value, +to.value);
 }
 function errorScreen(error, retry) {
   root.innerHTML = `<section class="screen loading"><h1>تعذر المتابعة</h1><p>${escapeHTML(error.message || error)}</p><button class="primary" id="retry">إعادة المحاولة</button></section>`;
   document.getElementById('retry').onclick = retry;
 }
-class Stabilizer {
-  constructor(onWord) { this.previous = []; this.emitted = []; this.onWord = onWord; }
-  push(text) {
-    const current = (text.match(/[\u0621-\u06FF]+/g) || []).filter(word => normalizeWord(word));
-    const a = this.previous.map(normalizeWord), b = current.map(normalizeWord);
-    let best = {length:0, start:0};
-    for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
-      let n = 0; while (a[i+n] && a[i+n] === b[j+n]) n++;
-      if (n > best.length) best = {length:n, start:j};
-    }
-    const stable = current.slice(best.start, best.start + best.length);
-    const emitted = this.emitted.map(normalizeWord);
-    let overlap = 0;
-    for (let n = Math.min(emitted.length, stable.length); n > 0; n--) {
-      if (emitted.slice(-n).join('|') === stable.slice(0,n).map(normalizeWord).join('|')) { overlap = n; break; }
-    }
-    if (best.length) {
-      for (const word of stable.slice(overlap)) { this.onWord(word); this.emitted.push(word); }
-      this.emitted = this.emitted.slice(-24);
-    }
-    this.previous = current;
+function updateCalibrationUI(value) {
+  const fill = document.getElementById('mic-meter-fill');
+  const marker = document.getElementById('mic-meter-marker');
+  const message = document.getElementById('calibration-message');
+  const check = document.getElementById('calibration-check');
+  const button = document.getElementById('calibration-start');
+  if (!fill) return;
+  fill.style.width = `${value.meterPercent}%`;
+  marker.style.left = `${value.thresholdPercent}%`;
+  document.getElementById('required-label').style.left = `${value.thresholdPercent}%`;
+  document.querySelector('.mic-meter')?.setAttribute('aria-valuenow', String(Math.round(value.meterPercent)));
+  if (message.textContent !== value.message) message.textContent = value.message;
+  check.hidden = !value.passed;
+  button.disabled = !value.passed;
+  if (value.noiseReady && provider?.ready &&
+      (configuredVad === null || Math.abs(value.recommendedVadThreshold-configuredVad)/configuredVad > .15)) {
+    configuredVad = value.recommendedVadThreshold;
+    provider.configure({vadThreshold:configuredVad});
   }
 }
+function handleAsrMessage(message) {
+  if (message.type === 'stage') {
+    const stage = document.getElementById('stage'); if (stage) stage.textContent = message.label;
+  } else if (message.type === 'hypothesis') {
+    if (mode === 'calibration' && message.phase === 'final') {
+      updateCalibrationUI(calibration.hear(message.text, message));
+    } else if (mode === 'recitation') {
+      transcriptGate?.push(message);
+    }
+    debugInfo({asrPhase:message.phase, partial:message.text, latency:message.latency,
+      acousticScore:message.acousticScore, expected:engine?.expected?.hafs,
+      currentRequiredWordId:engine?.currentRequiredWordId, currentAyah:engine?.currentAyah});
+  } else if (message.type === 'level') {
+    if (mode === 'recitation' && message.vadState === 'speech') engine?.heardSpeech();
+    if (mode === 'recitation' && message.silent) engine?.silence();
+    debugInfo({rms:message.rms, vadState:message.vadState, sampleRate:message.sampleRate});
+  } else if (message.type === 'recoverable' && debug) console.warn(message.message);
+}
+async function openCalibration(surah, fromAyah, toAyah) {
+  mode = 'calibration'; calibrationData = null; configuredVad = null;
+  root.innerHTML = `<section class="screen calibration">
+    <button class="back" id="calibration-back">رجوع</button>
+    <div class="calibration-content"><h1>اختبار الميكروفون</h1>
+      <p>اقرأ العبارة التالية بصوتك الطبيعي</p>
+      <div class="calibration-basmala">بِسْمِ اللَّهِ الرَّحْمَنِ الرَّحِيمِ</div>
+      <div class="mic-meter" role="meter" aria-label="مستوى صوت الميكروفون" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="mic-meter-track"><div id="mic-meter-fill" class="mic-meter-fill"></div>
+          <div id="mic-meter-marker" class="mic-meter-marker"></div></div>
+        <div class="mic-meter-labels"><span>منخفض</span><span id="required-label">الحد المطلوب</span><span>قوي</span></div>
+      </div>
+      <div id="calibration-check" class="calibration-check" hidden>✓</div>
+      <p id="calibration-message" class="calibration-message" role="status">انتظر قليلًا لقياس هدوء المكان</p>
+      <p id="stage" class="calibration-stage">جاري تجهيز التعرّف الصوتي…</p>
+      <button class="primary" id="calibration-start" disabled>بدء التسميع</button>
+    </div></section>`;
+  document.getElementById('calibration-back').onclick = async () => { await cleanup(); setup(); };
+  document.getElementById('calibration-start').onclick = () => begin(surah, fromAyah, toAyah);
+  stream = await requestMicrophone();
+  calibration = new MicrophoneCalibration();
+  microphone = new Microphone(stream, pcm => {
+    if (mode === 'calibration') updateCalibrationUI(calibration.observe(pcm));
+    if (mode === 'calibration' || mode === 'recitation') provider?.push(pcm);
+  }, async error => { await cleanup(); errorScreen(error, setup); });
+  calibration.deviceSampleRate = await microphone.start();
+  provider = new BrowserFastConformerProvider(handleAsrMessage);
+  await provider.init();
+  provider.configure({vadThreshold:calibration.recommendedVadThreshold});
+  configuredVad = calibration.recommendedVadThreshold;
+  provider.start();
+  const stage = document.getElementById('stage'); if (stage) stage.textContent = 'استمع الآن إلى البسملة';
+  updateCalibrationUI(calibration.snapshot());
+}
+function diagnoseCenter() {
+  if (!debug) return;
+  requestAnimationFrame(() => {
+    const stage = document.querySelector('.page-shell');
+    const frame = document.querySelector('.mushaf-frame rect');
+    if (!stage || !frame) return;
+    const viewportCenterX = stage.getBoundingClientRect().left + stage.getBoundingClientRect().width/2;
+    const pageFrameCenterX = frame.getBoundingClientRect().left + frame.getBoundingClientRect().width/2;
+    const offsetX = pageFrameCenterX-viewportCenterX;
+    debugInfo({viewportCenterX, pageFrameCenterX, offsetX, page:renderer?.page});
+    if (Math.abs(offsetX)>2) console.warn('Mushaf frame is off-center', offsetX);
+  });
+}
 async function begin(surah, fromAyah, toAyah) {
-  if (downloadManager.state !== 'installed') return home();
-  if (!stream?.getAudioTracks().some(t => t.readyState === 'live')) return;
-  session = {id: crypto.randomUUID(), surah, fromAyah, toAyah};
+  if (!calibration?.passed || !provider?.ready || !stream?.getAudioTracks().some(t => t.readyState === 'live')) return;
+  calibrationData = calibration.snapshot();
+  mode = 'preparing'; report = null;
+  session = {id:crypto.randomUUID(), surah, fromAyah, toAyah, calibration:{
+    noiseFloorDb:calibrationData.noiseFloorDb, normalSpeechRms:calibrationData.speechRms,
+    peakSpeechRms:calibrationData.peakRms, recommendedVadThreshold:calibrationData.recommendedVadThreshold,
+    deviceSampleRate:calibrationData.deviceSampleRate}};
   sessionStorage.setItem('interrupted', JSON.stringify(session));
-  root.innerHTML = '<section class="screen loading"><div class="spinner"></div><h1>جاري تجهيز نظام الاستماع</h1><p id="stage">تحميل نموذج التعرّف</p></section>';
+  root.innerHTML = '<section class="screen loading"><div class="spinner"></div><h1>جاري تجهيز المصحف</h1></section>';
   const words = selectedWords(data.index, surah, fromAyah, toAyah);
   if (!words.length) return errorScreen(Error('لم تُعثر كلمات الآيات المختارة'), setup);
   try {
     const firstPage = words[0].page;
     renderer = new MushafRenderer(document.createElement('div'));
     await renderer.preload(firstPage);
-    const stabilizer = new Stabilizer(word => engine?.accept(word));
-    provider = new BrowserFastConformerProvider(message => {
-      if (message.type === 'stage') { const stage = document.getElementById('stage'); if (stage) stage.textContent = message.label; }
-      if (message.type === 'hypothesis') { stabilizer.push(message.text); debugInfo({partial:message.text, latency:message.latency, expected:engine?.expected?.hafs, page:renderer?.page, model:'ready'}); }
-      if (message.type === 'level') { if (message.silent) engine?.silence(); if (debug) debugInfo({rms:message.rms, sampleRate:message.sampleRate, expected:engine?.expected?.hafs, page:renderer?.page}); }
-      if (message.type === 'recoverable') { if (debug) console.warn(message.message); }
+    root.innerHTML = `<section class="screen recite"><div class="recite-header"><button id="exit" aria-label="إنهاء التسميع">خروج</button><span id="page-number"></span></div><div class="page-shell"><div id="mushaf" class="mushaf-page" aria-label="صفحة المصحف"></div></div><div class="live-bar"><span class="live-dot" aria-hidden="true"></span><span id="live-status">الاستماع مباشر</span></div></section>`;
+    renderer = new MushafRenderer(document.getElementById('mushaf'), page => {
+      const number = document.getElementById('page-number');
+      if (number) number.textContent = `صفحة ${arabic(page)}`;
+      diagnoseCenter();
     });
-    await provider.init();
-    root.innerHTML = `<section class="screen recite"><div class="recite-header"><button id="exit" aria-label="إنهاء التسميع">خروج</button><span id="page-number"></span></div><div class="page-shell"><div id="mushaf" class="mushaf-page" aria-label="صفحة المصحف"></div></div><div class="live-bar"><span class="live-dot" aria-hidden="true"></span><span>الاستماع مباشر</span></div></section>`;
-    renderer = new MushafRenderer(document.getElementById('mushaf'), page => document.getElementById('page-number').textContent = `صفحة ${arabic(page)}`);
-    engine = new RecitationEngine(words, (word, active) => renderer.update(word, active), page => renderer.show(page, words).catch(error => errorScreen(error, () => renderer.show(page, words))), finish);
+    engine = new RecitationEngine(words, (word, active) => {
+      renderer.update(word, active);
+      if (word.state === 'correct') { const status = document.getElementById('live-status'); if (status) status.textContent = 'الاستماع مباشر'; }
+    }, page => renderer.show(page, words).catch(error => errorScreen(error, () => renderer.show(page, words))),
+    finish, () => { const status = document.getElementById('live-status'); if (status) status.textContent = 'لم يتضح الصوت، أعد الكلمة الحالية'; });
+    transcriptGate = new TranscriptGate((tokens, meta) => engine?.acceptCommitted(tokens, meta),
+      stable => debugInfo({stabilizedPartial:stable.join(' ')}));
     await renderer.show(firstPage, words);
     document.getElementById('exit').onclick = async () => { await cleanup(); sessionStorage.removeItem('interrupted'); home(); };
-    if (!stream.getAudioTracks().some(t => t.readyState === 'live')) throw Error('انقطع اتصال الميكروفون أثناء تجهيز النموذج');
-    microphone = new Microphone(stream, pcm => provider.push(pcm), async error => { await cleanup(); errorScreen(error, setup); });
-    const sampleRate = await microphone.start();
-    provider.start();
-    debugInfo({sampleRate, model:'ready', expected:engine.expected.hafs, page:firstPage});
+    provider.reset(); provider.configure({vadThreshold:calibrationData.recommendedVadThreshold});
+    calibration = null; mode = 'recitation';
+    debugInfo({model:'ready', expected:engine.expected.hafs, page:firstPage,
+      noiseFloorDb:calibrationData.noiseFloorDb, vadThreshold:calibrationData.recommendedVadThreshold});
   } catch(error) { await cleanup(); errorScreen(error, setup); }
 }
-async function cleanup() { provider?.stop(); provider = null; await microphone?.stop(); microphone = null; stream?.getTracks().forEach(t => t.stop()); stream = null; }
+async function cleanup() {
+  mode = 'idle'; provider?.stop(); provider = null; transcriptGate = null;
+  await microphone?.stop(); microphone = null;
+  stream?.getTracks().forEach(track => track.stop()); stream = null;
+  calibration = null;
+}
 async function finish() {
   if (report) return;
   report = buildReport(session, engine);
+  debugInfo({reportErrors:report.debugErrors});
   await cleanup(); sessionStorage.removeItem('interrupted');
   saveReport(report).catch(error => { if (debug) console.warn('تعذر حفظ التقرير في Firebase', error); });
   showReport();
@@ -200,7 +274,8 @@ function showReport() {
   if (!report) return home();
   const stats = [
     ['إجمالي الكلمات', report.totals.words],['الكلمات الصحيحة', report.totals.correctWords],
-    ['الكلمات التي احتاجت إلى تكرار', report.totals.requiredRepetition],['عدد الأخطاء', report.totals.errors],
+    ['صحيحة من أول محاولة', report.totals.correctFirstAttempt],
+    ['الكلمات التي احتاجت إلى تكرار', report.totals.requiredRepetition],['الأخطاء المؤكدة', report.totals.errors],
     ['الكلمات المتجاوزة', report.totals.skipped],
     ['كُشفت بعد ثلاث محاولات', report.totals.revealedAfterThreeErrors],['مرات التكرار', report.totals.repetitions],
     ['التوقف الطويل', report.totals.longPauses],['نسبة الإتمام', `${report.totals.completion}٪`]

@@ -61,7 +61,7 @@ function decorate(svg, page) {
 }
 
 export class MushafRenderer {
-  constructor(container, onPage) { this.container = container; this.onPage = onPage; this.cache = new Map(); this.page = null; this.nodes = new Map(); }
+  constructor(container, onPage) { this.container = container; this.onPage = onPage; this.cache = new Map(); this.page = null; this.nodes = new Map(); this.boxes = new Map(); this.overlays = new Map(); this.activeWordId = null; this.showVersion = 0; }
   async preload(page) {
     if (!page || page > 604 || this.cache.has(page)) return;
     const url = mushafPageUrl(page);
@@ -71,7 +71,10 @@ export class MushafRenderer {
     if (this.cache.size > 4) this.cache.delete(this.cache.keys().next().value);
   }
   async show(page, words) {
+    const version = ++this.showVersion;
+    if (this.page === page) return;
     await this.preload(page);
+    if (version !== this.showVersion) return;
     const doc = new DOMParser().parseFromString(this.cache.get(page), 'image/svg+xml');
     if (doc.querySelector('parsererror')) throw Error('ملف المصحف غير صالح');
     const svg = document.importNode(doc.documentElement, true);
@@ -82,7 +85,7 @@ export class MushafRenderer {
       svg.querySelector(':scope > title')?.remove();
     this.container.replaceChildren(svg);
     decorate(svg, page);
-    this.nodes.clear(); this.page = page;
+    this.nodes.clear(); this.boxes.clear(); this.overlays.clear(); this.page = page;
     const selected = new Map(words.filter(w => w.page === page).map(w => [w.key, w]));
     for (const group of svg.querySelectorAll('[id^="md-word-"][data-surah][data-aya][data-word-index-in-ayah]')) {
       if (group.getAttribute('data-type') !== 'text') continue;
@@ -90,27 +93,53 @@ export class MushafRenderer {
       const word = selected.get(key);
       if (!word) continue;
       this.nodes.set(key, group);
+      this.boxes.set(group.id, group.getBBox());
       group.classList.toggle('is-hidden', !word.revealed);
-      if (word.state === 'incorrect-placeholder' || word.revealedByErrorLimit) this.overlay(group, word.revealedByErrorLimit ? 'revealed-error' : 'error');
+      this.update(word, word.key === this.activeWordId);
     }
     this.onPage?.(page);
     this.preload(page + 1).catch(() => {});
   }
   overlay(group, kind) {
-    group.parentNode.querySelector(`.word-overlay[data-for="${group.id}"]`)?.remove();
-    const box = group.getBBox();
-    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    rect.setAttribute('x', box.x - 1); rect.setAttribute('y', box.y - 1);
-    rect.setAttribute('width', Math.max(box.width + 2, 5)); rect.setAttribute('height', Math.max(box.height + 2, 5));
-    rect.setAttribute('rx', 1.5); rect.dataset.for = group.id; rect.setAttribute('class', `word-overlay ${kind}`);
-    group.before(rect);
+    const key = `${group.id}:${kind}`;
+    if (this.overlays.has(key)) return;
+    const box = this.boxes.get(group.id);
+    const rect = element('rect', {x:box.x-1, y:box.y-1,
+      width:Math.max(box.width+2,5), height:Math.max(box.height+2,5), rx:1.5,
+      class:`word-overlay ${kind}`, 'aria-hidden':'true'});
+    group.before(rect); this.overlays.set(key, rect);
+  }
+  removeOverlay(group, kind) {
+    const key = `${group.id}:${kind}`;
+    this.overlays.get(key)?.remove(); this.overlays.delete(key);
+  }
+  setActiveWord(wordId) {
+    if (this.activeWordId && this.activeWordId !== wordId) this.clearActiveWord(this.activeWordId);
+    this.activeWordId = wordId;
+    const group = this.nodes.get(wordId);
+    if (group && !group.classList.contains('is-hidden')) this.overlay(group, 'active');
+  }
+  clearActiveWord(wordId = this.activeWordId) {
+    const group = this.nodes.get(wordId);
+    if (group) this.removeOverlay(group, 'active');
+    if (wordId === this.activeWordId) this.activeWordId = null;
+  }
+  revealWord(wordId) { this.nodes.get(wordId)?.classList.remove('is-hidden'); }
+  showWordError(wordId) { const group = this.nodes.get(wordId); if (group) this.overlay(group, 'error'); }
+  clearWordError(wordId) { const group = this.nodes.get(wordId); if (group) this.removeOverlay(group, 'error'); }
+  revealWordAfterFailures(wordId) {
+    this.revealWord(wordId); this.clearWordError(wordId);
+    const group = this.nodes.get(wordId); if (group) this.overlay(group, 'revealed-error');
   }
   update(word, active = false) {
+    // Remember off-page state while an asynchronous page load is in flight.
+    if (active) this.setActiveWord(word.key);
+    else if (this.activeWordId === word.key) this.clearActiveWord(word.key);
     const group = this.nodes.get(word.key); if (!group) return;
-    group.classList.toggle('is-hidden', !word.revealed);
-    group.parentNode.querySelector(`.word-overlay[data-for="${group.id}"]`)?.remove();
-    if (active) this.overlay(group, 'active');
-    else if (word.revealedByErrorLimit) this.overlay(group, 'revealed-error');
-    else if (word.state === 'incorrect-placeholder') this.overlay(group, 'error');
+    if (word.revealed) this.revealWord(word.key);
+    if (word.revealedByErrorLimit) this.revealWordAfterFailures(word.key);
+    else if (word.state === 'incorrect-placeholder') this.showWordError(word.key);
+    else this.clearWordError(word.key);
+    if (active) this.setActiveWord(word.key);
   }
 }

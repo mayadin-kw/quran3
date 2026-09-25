@@ -1,6 +1,6 @@
 {
   "model": "fastconformer-quran-ar",
-  "variant": "onnx-int8-streaming",
+  "variant": "onnx-int8-causal-stateless-encoder",
   "base_checkpoint": "mohammed/fastconformer-quran-ar",
   "vocab_size": 1024,
   "sample_rate": 16000,
@@ -12,7 +12,7 @@
   "self_attention_model": "rel_pos_local_attn",
   "conv_context": "causal",
   "decoding": "greedy_search",
-  "runtime": "sherpa-onnx",
+  "runtime": "onnxruntime-web",
   "metadata": {
     "vocab_size": "1024",
     "subsampling_factor": "8",
@@ -32,5 +32,10 @@
     "cache_last_time_dim1": "17",
     "cache_last_time_dim2": "512",
     "cache_last_time_dim3": "8"
+  },
+  "streaming_adapter": {
+    "mode": "offline-windowed-fallback",
+    "cache_aware": false,
+    "validated_low_latency": false
   }
 }

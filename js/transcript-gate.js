@@ -1,50 +1,43 @@
 import {normalizeWord} from './quran-data.js';
-
 export const tokenizeArabic = text => (String(text || '').match(/[\u0621-\u06FF]+/g) || [])
-  .map(token => normalizeWord(token)).filter(Boolean);
+  .map(normalizeWord).filter(Boolean);
 
-// Raw hypotheses are observations. Only the final hypothesis of a bounded
-// speech segment crosses the permanent-state boundary.
+// Commit an append-only lexical prefix. Revisions never undo Quran progress.
 export class TranscriptGate {
   constructor(onCommitted, onStabilized = () => {}) {
     this.onCommitted = onCommitted; this.onStabilized = onStabilized; this.reset();
   }
-  reset() { this.history = new Map(); this.finished = new Set(); }
+  reset() { this.history = new Map(); this.finished = new Set(); this.rawPartialTranscript = ''; this.stabilizedPartialTranscript = ''; }
   push(message) {
-    if (message.type !== 'hypothesis' || message.segmentId == null) return;
-    const id = message.segmentId;
-    if (this.finished.has(id)) return;
-    const tokens = tokenizeArabic(message.text);
-    if (message.phase === 'partial') {
-      const history = this.history.get(id) || [];
-      history.push(tokens);
-      if (history.length > 8) history.shift();
-      this.history.set(id, history);
-      if (history.length >= 2) {
-        const previous = history[history.length-2];
-        const stable = [];
-        for (let i = 0; i < Math.min(previous.length, tokens.length); i++) {
-          if (previous[i] !== tokens[i]) break;
-          stable.push(tokens[i]);
-        }
-        if (stable.length) this.onStabilized(stable, message);
-      }
-      return;
+    if (message.type !== 'hypothesis' || message.segmentId == null || this.finished.has(message.segmentId)) return;
+    const tokens = tokenizeArabic(message.text), id = message.segmentId;
+    const state = this.history.get(id) || {previous:[], counts:[], firstSeen:[], committed:[]};
+    this.rawPartialTranscript = message.text;
+    let common = 0;
+    while (common < tokens.length && tokens[common] === state.previous[common]) common++;
+    state.firstSeen = tokens.map((_, i) => i < common ? state.firstSeen[i] : {
+      audioChunkReceivedAt:message.audioChunkReceivedAt, partialHypothesisAt:message.partialHypothesisAt,
+      asrInferenceStartedAt:message.asrInferenceStartedAt});
+    state.counts = tokens.map((_, i) => i < common ? (state.counts[i] || 0) + 1 : 1);
+    state.previous = tokens;
+    this.history.set(id, state);
+    const compatible = state.committed.every((token, i) => token === tokens[i]);
+    if (compatible) for (let i = state.committed.length; i < tokens.length; i++) {
+      const stability = state.counts[i];
+      const stable = stability >= 2 || i < tokens.length - 1 || message.phase === 'final';
+      if (!stable) break;
+      const meta = {...message, ...state.firstSeen[i], confirmed:true, stability, nextToken:tokens[i+1],
+        confidence:message.acousticScore ?? null, eventId:`${id}:${i}`, tokenOffset:i,
+        durationMs:message.durationMs ?? (message.endAt - message.startAt),
+        wordStabilizedAt:Date.now()};
+      if (this.onCommitted([tokens[i]], meta) === false) break;
+      state.committed.push(tokens[i]);
     }
-    if (message.phase !== 'final') return;
-    this.finished.add(id);
-    const history = this.history.get(id) || [];
-    const lead = tokens[0];
-    const stability = lead ? 1 + history.filter(partial => partial[0] === lead).length : 0;
-    const tokenStabilities = tokens.map((token, at) =>
-      1 + history.filter(partial => partial[at] === token).length);
-    this.history.delete(id);
-    this.onCommitted(tokens, {
-      segmentId:id, confirmed:true, stability,
-      tokenStabilities,
-      confidence:message.acousticScore ?? null,
-      durationMs:message.durationMs ?? 0,
-      startAt:message.startAt ?? null, endAt:message.endAt ?? null
-    });
+    this.stabilizedPartialTranscript = state.committed.join(' ');
+    this.onStabilized(state.committed, message);
+    if (message.phase === 'final') {
+      this.history.delete(id); this.finished.add(id);
+      if (this.finished.size > 64) this.finished.delete(this.finished.values().next().value);
+    }
   }
 }

@@ -1,7 +1,7 @@
 import {loadQuran, selectedWords} from './quran-data.js';
 import {MushafRenderer} from './mushaf-renderer.js';
 import {requestMicrophone, Microphone} from './microphone.js';
-import {BrowserFastConformerProvider} from './asr-engine.js';
+import {BrowserFastConformerProvider, BrowserStreamingProvider} from './asr-engine.js';
 import {RecitationEngine} from './recitation-engine.js';
 import {buildReport} from './report-engine.js';
 import {saveReport} from './firebase.js';
@@ -15,6 +15,7 @@ const debugState = {};
 let data, stream, microphone, provider, engine, renderer, session, report;
 let calibration, calibrationData, transcriptGate, mode = 'idle';
 let configuredVad = null;
+let providerChoice = 'browser';
 let homeUnsubscribe;
 let modalUnsubscribe;
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -109,7 +110,17 @@ async function setup() {
   root.innerHTML = `<section class="screen setup"><button class="back" id="back-home">رجوع</button><h1>إعداد التسميع</h1>
     <label class="field">السورة<select id="surah">${options}</select></label>
     <div class="range"><label class="field">من آية<select id="from"></select></label><label class="field">إلى آية<select id="to"></select></label></div>
+    <label class="field">طريقة الاستماع<select id="asr-provider">
+      <option value="browser">مباشر عبر خدمة المتصفح</option>
+      <option value="local">محلي — قد يتأخر ظهور الكلمات</option></select></label>
+    <p id="asr-disclosure">الاستماع المباشر قد يرسل صوتك إلى خدمة التعرف التابعة للمتصفح ويتطلب اتصالًا بالإنترنت. بالمتابعة تختار استخدام هذه الخدمة.</p>
     <div class="spacer"></div><div id="setup-error" class="message" role="alert"></div><button class="primary" id="next">التالي</button></section>`;
+  const providerSelect = document.getElementById('asr-provider');
+  providerSelect.onchange = () => {
+    document.getElementById('asr-disclosure').textContent = providerSelect.value === 'browser'
+      ? 'الاستماع المباشر قد يرسل صوتك إلى خدمة التعرف التابعة للمتصفح ويتطلب اتصالًا بالإنترنت. بالمتابعة تختار استخدام هذه الخدمة.'
+      : 'يبقى الصوت على جهازك. النموذج المحلي الحالي لا يضمن التتبع المباشر منخفض التأخير.';
+  };
   const surah = document.getElementById('surah'), from = document.getElementById('from'), to = document.getElementById('to');
   function ayahOptions() {
     const count = data.surahs[surah.value].verses;
@@ -121,6 +132,10 @@ async function setup() {
   to.onchange = () => { if (+to.value < +from.value) to.value = from.value; };
   document.getElementById('back-home').onclick = home;
   document.getElementById('next').onclick = async () => {
+    providerChoice = providerSelect.value;
+    if (providerChoice === 'browser' && !BrowserStreamingProvider.supported) {
+      document.getElementById('setup-error').textContent = 'هذا المتصفح لا يدعم خدمة الاستماع المباشر. استخدم متصفحًا متوافقًا أو اختر الاستماع المحلي.'; return;
+    }
     const button = document.getElementById('next'); button.disabled = true;
     try { await openCalibration(+surah.value, +from.value, +to.value); }
     catch (error) {
@@ -168,8 +183,10 @@ function handleAsrMessage(message) {
       currentRequiredWordId:engine?.currentRequiredWordId, currentAyah:engine?.currentAyah});
   } else if (message.type === 'level') {
     if (mode === 'recitation' && message.vadState === 'speech') engine?.heardSpeech();
-    if (mode === 'recitation' && message.silent) engine?.silence();
+    if (mode === 'recitation' && message.vadState === 'silence') engine?.silence();
     debugInfo({rms:message.rms, vadState:message.vadState, sampleRate:message.sampleRate});
+  } else if (message.type === 'error') {
+    cleanup().then(() => errorScreen(Error(message.message), setup));
   } else if (message.type === 'recoverable' && debug) console.warn(message.message);
 }
 async function openCalibration(surah, fromAyah, toAyah) {
@@ -198,7 +215,7 @@ async function openCalibration(surah, fromAyah, toAyah) {
     if (mode === 'calibration' || mode === 'recitation') provider?.push(pcm);
   }, async error => { await cleanup(); errorScreen(error, setup); });
   calibration.deviceSampleRate = await microphone.start();
-  provider = new BrowserFastConformerProvider(handleAsrMessage);
+  provider = providerChoice === 'browser' ? new BrowserStreamingProvider(handleAsrMessage) : new BrowserFastConformerProvider(handleAsrMessage);
   await provider.init();
   provider.configure({vadThreshold:calibration.recommendedVadThreshold});
   configuredVad = calibration.recommendedVadThreshold;
@@ -235,7 +252,7 @@ async function begin(surah, fromAyah, toAyah) {
     const firstPage = words[0].page;
     renderer = new MushafRenderer(document.createElement('div'));
     await renderer.preload(firstPage);
-    root.innerHTML = `<section class="screen recite"><div class="recite-header"><button id="exit" aria-label="إنهاء التسميع">خروج</button><span id="page-number"></span></div><div class="page-shell"><div id="mushaf" class="mushaf-page" aria-label="صفحة المصحف"></div></div><div class="live-bar"><span class="live-dot" aria-hidden="true"></span><span id="live-status">الاستماع مباشر</span></div></section>`;
+    root.innerHTML = `<section class="screen recite"><div class="recite-header"><button id="exit" aria-label="إنهاء التسميع">خروج</button><button id="finish-recitation" hidden>النتيجة</button><span id="page-number"></span></div><div class="page-shell"><div id="mushaf" class="mushaf-page" aria-label="صفحة المصحف"></div></div><div class="live-bar"><span class="live-dot" aria-hidden="true"></span><span id="live-status">${providerChoice === 'browser' ? 'الاستماع مباشر' : 'الاستماع محلي — قد يتأخر التتبع'}</span></div></section>`;
     renderer = new MushafRenderer(document.getElementById('mushaf'), page => {
       const number = document.getElementById('page-number');
       if (number) number.textContent = `صفحة ${arabic(page)}`;
@@ -243,12 +260,30 @@ async function begin(surah, fromAyah, toAyah) {
     });
     engine = new RecitationEngine(words, (word, active) => {
       renderer.update(word, active);
-      if (word.state === 'correct') { const status = document.getElementById('live-status'); if (status) status.textContent = 'الاستماع مباشر'; }
+      if (word.state === 'correct') { const status = document.getElementById('live-status'); if (status) status.textContent = (providerChoice === 'browser' ? 'الاستماع مباشر' : 'الاستماع محلي — قد يتأخر التتبع'); }
     }, page => renderer.show(page, words).catch(error => errorScreen(error, () => renderer.show(page, words))),
-    finish, () => { const status = document.getElementById('live-status'); if (status) status.textContent = 'لم يتضح الصوت، أعد الكلمة الحالية'; });
-    transcriptGate = new TranscriptGate((tokens, meta) => engine?.acceptCommitted(tokens, meta),
-      stable => debugInfo({stabilizedPartial:stable.join(' ')}));
+    () => { document.getElementById('finish-recitation').hidden = false; }, () => { const status = document.getElementById('live-status'); if (status) status.textContent = 'لم يتضح الصوت، أعد الكلمة الحالية'; });
+    transcriptGate = new TranscriptGate((tokens, meta) => {
+      const consumed = engine?.acceptCommitted(tokens, meta);
+      const uiUpdatedAt = Date.now();
+      debugInfo({audioChunkReceivedAt:meta.audioChunkReceivedAt,
+        asrInferenceStartedAt:meta.asrInferenceStartedAt, partialHypothesisAt:meta.partialHypothesisAt,
+        wordStabilizedAt:meta.wordStabilizedAt, uiUpdatedAt,
+        audioToPartialMs:meta.audioChunkReceivedAt == null ? null : meta.partialHypothesisAt-meta.audioChunkReceivedAt,
+        partialToUiMs:uiUpdatedAt-meta.partialHypothesisAt,
+        totalPipelineMs:meta.audioChunkReceivedAt == null ? null : uiUpdatedAt-meta.audioChunkReceivedAt,
+        currentSpokenWordId:engine?.currentSpokenWordId, primaryCursor:engine?.primaryCursor,
+        highlightCursor:engine?.highlightCursor});
+      return consumed;
+    }, (stable, message) => {
+      const history = [...(debugState.partialStream || []),
+        {at:Date.now(), RAW:message.text, STABLE:stable.join(' '),
+          EXPECTED:engine?.expected?.hafs, CURRENT_WORD:engine?.currentSpokenWordId}].slice(-20);
+      debugInfo({rawPartialTranscript:message.text, stabilizedPartialTranscript:stable.join(' '),
+        partialStream:history, backlogMs:message.backlogMs, encoderMode:message.encoderMode});
+    });
     await renderer.show(firstPage, words);
+    document.getElementById('finish-recitation').onclick = finish;
     document.getElementById('exit').onclick = async () => { await cleanup(); sessionStorage.removeItem('interrupted'); home(); };
     provider.reset(); provider.configure({vadThreshold:calibrationData.recommendedVadThreshold});
     calibration = null; mode = 'recitation';

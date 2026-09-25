@@ -1,4 +1,4 @@
-/* Quran FastConformer RNNT inference. Audio stays in this browser. */
+/* Local windowed FastConformer fallback. This stateless export is NOT cache-aware streaming. */
 let encoder, decoder, vocabulary, running = false;
 let segment = null, preRoll = new Float32Array(0), hotBlocks = 0, coldBlocks = 0;
 let segmentId = 0, generation = 0, partialPending = false;
@@ -140,11 +140,16 @@ function queueInference(samples, details, partial = false) {
   if (partial && partialPending) return;
   if (partial) partialPending = true;
   const expectedGeneration = generation;
-  const task = inferenceQueue.then(() => infer(samples));
+  let asrInferenceStartedAt;
+  const task = inferenceQueue.then(() => {
+    if (expectedGeneration !== generation || !running) return null;
+    asrInferenceStartedAt = Date.now(); return infer(samples);
+  });
   inferenceQueue = task.catch(() => {});
   task.then(result => {
-    if (expectedGeneration !== generation || !running) return;
-    self.postMessage({type:'hypothesis', ...details, ...result});
+    if (!result || expectedGeneration !== generation || !running) return;
+    self.postMessage({type:'hypothesis', ...details, ...result, asrInferenceStartedAt,
+      partialHypothesisAt:Date.now(), encoderMode:'offline-windowed'});
   }).catch(error => self.postMessage({type:'recoverable', message:error.message}))
     .finally(() => { if (partial) partialPending = false; });
 }
@@ -177,11 +182,11 @@ function receivePcm(pcm) {
   }
   segment.samples = append(segment.samples, pcm);
   coldBlocks = speech ? 0 : coldBlocks + 1;
-  if (segment.samples.length >= RATE*.85 &&
-      segment.samples.length-segment.lastPartialLength >= RATE*.75 && speech) {
+  if (segment.samples.length >= RATE*.48 &&
+      segment.samples.length-segment.lastPartialLength >= RATE*.32 && speech && !partialPending) {
     segment.lastPartialLength = segment.samples.length;
     queueInference(segment.samples.slice(), {phase:'partial', segmentId:segment.id,
-      startAt:segment.startAt, endAt:Date.now()}, true);
+      startAt:segment.startAt, endAt:Date.now(), audioChunkReceivedAt:Date.now()}, true);
   }
   if (coldBlocks >= 5 || segment.samples.length >= RATE*11.5) finishSegment();
 }

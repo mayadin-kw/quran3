@@ -22,3 +22,5 @@
 .calibration-check{width:46px;height:46px;border-radius:50%;background:#2b955c;color:white;display:grid;place-items:center;font-size:29px;animation:rise .3s ease}
 .calibration-check[hidden]{display:none}
 .calibration-content .primary{width:100%}
+
+.debug{max-height:70vh;overflow:auto;pointer-events:auto}

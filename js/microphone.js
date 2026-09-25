@@ -14,7 +14,9 @@ export class Microphone {
     this.source = this.context.createMediaStreamSource(this.stream);
     this.worklet = new AudioWorkletNode(this.context, 'quran-capture');
     this.silent = this.context.createGain(); this.silent.gain.value = 0;
-    this.worklet.port.onmessage = event => this.onSamples(event.data.pcm);
+    this.worklet.port.onmessage = event => this.onSamples(event.data.pcm, {
+      audioFrameReceivedAt:Date.now()
+    });
     this.source.connect(this.worklet); this.worklet.connect(this.silent); this.silent.connect(this.context.destination);
     await this.context.resume();
     this.stream.getAudioTracks().forEach(track => track.onended = () => this.onError(Error('انقطع اتصال الميكروفون')));

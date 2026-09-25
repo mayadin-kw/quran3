@@ -1,12 +1,14 @@
-const SHELL = 'quran-shell-v4';
+const SHELL = 'quran-shell-v7';
 const CORE = 'recitation-core';
 // Publish the complete executable shell atomically. Old CORE entries must not
 // shadow a new worker, matcher, or asset manifest after an application update.
 const SHELL_FILES = ['index.html', 'css/app.css', 'data/recitation-assets-manifest.json',
   'assets/models/meta.json', 'service-worker.js',
-  'js/app.js', 'js/asr-engine.js', 'js/asr-worker.js', 'js/audio-worklet.js',
+  'js/app.js', 'js/asr-selection.js', 'js/asr-engine.js', 'js/asr-worker.js', 'js/audio-worklet.js',
   'js/calibration.js', 'js/download-manager.js', 'js/firebase.js', 'js/microphone.js',
-  'js/mushaf-renderer.js', 'js/quran-data.js', 'js/recitation-engine.js',
+  'js/mushaf-renderer.js', 'js/quran-data.js', 'js/pronunciation.js',
+  'js/pronunciation-provider.js', 'js/phoneme-scoring.js', 'js/phoneme-worker.js',
+  'js/word-audio.js', 'js/recitation-engine.js',
   'js/report-engine.js', 'js/sha256.js', 'js/transcript-gate.js'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(SHELL).then(cache => cache.addAll(SHELL_FILES)).then(() => self.skipWaiting()));

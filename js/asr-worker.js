@@ -89,14 +89,16 @@ function decodeTokens(ids) {
 }
 async function infer(pcm) {
   const start = performance.now();
+  const featureExtractionStartedAt = Date.now();
   const {data, frames} = features(pcm);
+  const featureExtractionEndedAt = Date.now();
   const inputs = {};
   inputs[encoder.inputNames[0]] = new ort.Tensor('float32', data, [1, 80, frames]);
   inputs[encoder.inputNames[1]] = tensor64(frames);
   const encoded = await encoder.run(inputs);
   const signal = encoded[encoder.outputNames[0]];
   const count = Number(encoded[encoder.outputNames[1]].data[0]);
-  const ids = [];
+  const ids = [], emissions = [];
   let state1 = new ort.Tensor('float32', new Float32Array(640), [1, 1, 640]);
   let state2 = new ort.Tensor('float32', new Float32Array(640), [1, 1, 640]);
   let target = BLANK;
@@ -120,12 +122,24 @@ async function infer(pcm) {
       for (let i = 0; i < logits.length; i++) if (i !== best && logits[i] > runnerUp) runnerUp = logits[i];
       scoreSum += 1 / (1 + Math.exp(-(logits[best] - runnerUp)));
       scoreCount++;
-      ids.push(best); target = best;
+      ids.push(best); emissions.push({piece:vocabulary[best] || '', frame}); target = best;
       state1 = result[decoder.outputNames[2]];
       state2 = result[decoder.outputNames[3]];
     }
   }
-  return {text:decodeTokens(ids), acousticScore:scoreCount ? scoreSum / scoreCount : 0,
+  const frameMs = pcm.length / RATE * 1000 / Math.max(count, 1);
+  const wordTimes = [];
+  for (const {piece,frame} of emissions) {
+    if (piece.startsWith('▁') || !wordTimes.length)
+      wordTimes.push({text:'',startMs:Math.max(0,Math.round(frame*frameMs)),endMs:0});
+    wordTimes.at(-1).text += piece.replace(/▁/g,'');
+    wordTimes.at(-1).endMs = Math.min(Math.round(pcm.length/RATE*1000),Math.round((frame+2)*frameMs));
+  }
+  for (let i=0;i<wordTimes.length-1;i++)
+    wordTimes[i].endMs = wordTimes[i+1].startMs;
+  return {text:decodeTokens(ids), wordTimes,
+    acousticScore:scoreCount ? scoreSum / scoreCount : 0,
+    featureExtractionStartedAt, featureExtractionEndedAt,
     latency:Math.round(performance.now() - start)};
 }
 function append(a, b, limit = RATE * 12) {
@@ -149,6 +163,7 @@ function queueInference(samples, details, partial = false) {
   task.then(result => {
     if (!result || expectedGeneration !== generation || !running) return;
     self.postMessage({type:'hypothesis', ...details, ...result, asrInferenceStartedAt,
+      asrInferenceEndedAt:Date.now(),
       partialHypothesisAt:Date.now(), encoderMode:'offline-windowed'});
   }).catch(error => self.postMessage({type:'recoverable', message:error.message}))
     .finally(() => { if (partial) partialPending = false; });
@@ -159,9 +174,10 @@ function finishSegment() {
   if (current.samples.length < RATE * .4) return;
   const endAt = Date.now();
   queueInference(current.samples, {phase:'final', segmentId:current.id,
-    startAt:current.startAt, endAt, durationMs:endAt-current.startAt});
+    startAt:current.startAt, endAt, durationMs:endAt-current.startAt,
+    speechMs:Math.round(current.speechSamples/RATE*1000)});
 }
-function receivePcm(pcm) {
+function receivePcm(pcm, audioFrameReceivedAt) {
   let power = 0, peak = 0;
   for (const value of pcm) { power += value*value; peak = Math.max(peak, Math.abs(value)); }
   const rms = Math.sqrt(power / pcm.length);
@@ -175,18 +191,23 @@ function receivePcm(pcm) {
     hotBlocks = speech ? hotBlocks + 1 : 0;
     if (hotBlocks >= 2) {
       segment = {id:++segmentId, startAt:Date.now()-Math.round(preRoll.length/RATE*1000),
-        samples:preRoll, lastPartialLength:0};
+        samples:preRoll, lastPartialLength:0, speechSamples:Math.min(preRoll.length, 2*pcm.length)};
       coldBlocks = 0;
     }
     return;
   }
   segment.samples = append(segment.samples, pcm);
+  if (speech) segment.speechSamples += pcm.length;
   coldBlocks = speech ? 0 : coldBlocks + 1;
-  if (segment.samples.length >= RATE*.48 &&
-      segment.samples.length-segment.lastPartialLength >= RATE*.32 && speech && !partialPending) {
+  if (segment.samples.length >= RATE*.32 &&
+      segment.samples.length-segment.lastPartialLength >= RATE*.16 && speech && !partialPending) {
+    const audioChunkReadyAt = Date.now();
+    const audioBufferingMs = (segment.samples.length-segment.lastPartialLength)/RATE*1000;
     segment.lastPartialLength = segment.samples.length;
     queueInference(segment.samples.slice(), {phase:'partial', segmentId:segment.id,
-      startAt:segment.startAt, endAt:Date.now(), audioChunkReceivedAt:Date.now()}, true);
+      startAt:segment.startAt, endAt:audioChunkReadyAt, audioFrameReceivedAt,
+      audioChunkReadyAt, audioBufferingMs, audioChunkReceivedAt:audioFrameReceivedAt,
+      speechMs:Math.round(segment.speechSamples/RATE*1000)}, true);
   }
   if (coldBlocks >= 5 || segment.samples.length >= RATE*11.5) finishSegment();
 }
@@ -218,6 +239,6 @@ self.onmessage = async ({data}) => {
     }
     else if (data.type === 'reset') { resetAudio(); }
     else if (data.type === 'stop') { running = false; resetAudio(); }
-    else if (data.type === 'pcm' && running) receivePcm(data.pcm);
+    else if (data.type === 'pcm' && running) receivePcm(data.pcm, data.audioFrameReceivedAt);
   } catch (error) { self.postMessage({type:'error', message:error.message || String(error)}); }
 };

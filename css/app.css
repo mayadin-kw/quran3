@@ -24,3 +24,6 @@
 .calibration-content .primary{width:100%}
 
 .debug{max-height:70vh;overflow:auto;pointer-events:auto}
+.mushaf-page [data-type="text"][id^="md-word-"].is-hidden.is-preview{visibility:visible}
+
+.mushaf-page .word-overlay.pronunciation-unverified{fill:#d8a536;fill-opacity:.13;stroke:#aa842c;stroke-width:.5}

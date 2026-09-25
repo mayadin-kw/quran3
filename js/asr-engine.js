@@ -17,14 +17,19 @@ export class BrowserFastConformerProvider {
         else if (message.type === 'error') { if (!settled) finish(Error(message.message)); else this.onMessage(message); }
         else this.onMessage(message);
       };
-      this.worker.onerror = event => finish(Error(event.message || 'تعذر تشغيل نموذج الاستماع'));
+      this.worker.onerror = event => {
+        if (!settled) finish(Error(event.message || 'تعذر تشغيل نموذج الاستماع'));
+        else this.onMessage({type:'error',message:event.message || 'تعذر تشغيل نظام الاستماع'});
+      };
       this.worker.postMessage({ type: 'init' });
     });
   }
   start() { this.worker?.postMessage({ type: 'start' }); }
   configure(values) { this.worker?.postMessage({type:'configure', ...values}); }
   reset() { this.worker?.postMessage({type:'reset'}); }
-  push(pcm) { if (this.ready) this.worker?.postMessage({ type: 'pcm', pcm, audioChunkReceivedAt:Date.now() }, [pcm.buffer]); }
+  push(pcm, timing = {}) { if (this.ready) this.worker?.postMessage({
+    type: 'pcm', pcm, audioFrameReceivedAt:timing.audioFrameReceivedAt ?? Date.now()
+  }, [pcm.buffer]); }
   stop() { this.cancelInit?.(); this.worker?.postMessage({ type: 'stop' }); this.worker?.terminate(); this.worker = null; this.ready = false; }
 }
 
@@ -37,6 +42,7 @@ export class BrowserStreamingProvider {
     this.onMessage = onMessage; this.ready = false; this.running = false;
     this.cycle = 0; this.generation = 0; this.resultsLength = 0; this.ignoreBefore = 0;
     this.partialSegments = new Set(); this.started = new Map(); this.vadThreshold = .006;
+    this.speechSamples = 0;
   }
   async init() {
     const Recognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
@@ -51,7 +57,7 @@ export class BrowserStreamingProvider {
         const id = `${this.generation}:${this.cycle}:${i}`;
         if (!this.started.has(id)) this.started.set(id, this.speechStartedAt || now);
         if (!result.isFinal) this.partialSegments.add(id);
-        if (result.isFinal && !this.partialSegments.size) {
+        if (result.isFinal && !this.partialSegments.has(id)) {
           this.running = false; r.abort();
           this.onMessage({type:'error', message:'خدمة المتصفح أعادت نتيجة نهائية فقط. لم يُتحقق البث المباشر؛ جرّب متصفحًا يدعم النتائج الجزئية.'});
           return;
@@ -61,13 +67,14 @@ export class BrowserStreamingProvider {
           text:result[0].transcript, segmentId:id,
           acousticScore:confidence > 0 ? confidence : null,
           startAt:this.started.get(id), endAt:now, durationMs:now-this.started.get(id),
+          speechMs:Math.round(this.speechSamples/16),
           // Native recognition exposes no chunk-to-hypothesis or inference clock.
           audioChunkReceivedAt:null, asrInferenceStartedAt:null, partialHypothesisAt:now,
           encoderMode:'browser-interim', timingAvailable:false});
-        if (result.isFinal) this.started.delete(id);
+        if (result.isFinal) { this.started.delete(id); this.partialSegments.delete(id); }
       }
     };
-    r.onspeechstart = () => { this.speechStartedAt = Date.now(); };
+    r.onspeechstart = () => { this.speechStartedAt = Date.now(); this.speechSamples = 0; };
     r.onerror = event => {
       if (!this.running || event.error === 'no-speech' || event.error === 'aborted') return;
       this.running = false;
@@ -76,7 +83,8 @@ export class BrowserStreamingProvider {
     r.onend = () => {
       if (!this.running) return;
       // Browser service interruptions only; never restart at a Quran/Ayah boundary.
-      this.cycle++; this.resultsLength = 0; this.ignoreBefore = 0; this.started.clear();
+      this.cycle++; this.resultsLength = 0; this.ignoreBefore = 0;
+      this.started.clear(); this.partialSegments.clear(); this.speechSamples = 0;
       this.restartTimer = setTimeout(() => {
         if (!this.running) return;
         try { r.start(); } catch (error) { this.running=false; this.onMessage({type:'error',message:error.message}); }
@@ -86,11 +94,13 @@ export class BrowserStreamingProvider {
   }
   start() { if (!this.ready || this.running) return; this.running = true; this.recognition.start(); }
   configure(values) { if (Number.isFinite(values.vadThreshold)) this.vadThreshold = values.vadThreshold; }
-  reset() { this.generation++; this.ignoreBefore = this.resultsLength; this.started.clear(); }
+  reset() { this.generation++; this.ignoreBefore = this.resultsLength; this.speechSamples = 0;
+    this.started.clear(); this.partialSegments.clear(); }
   push(pcm) {
     let power=0, peak=0;
     for (const value of pcm) { power+=value*value; peak=Math.max(peak,Math.abs(value)); }
     const rms=Math.sqrt(power/pcm.length);
+    if (rms >= this.vadThreshold) this.speechSamples += pcm.length;
     this.onMessage({type:'level',rms,peak,sampleRate:16000,vadState:rms>=this.vadThreshold?'speech':'silence'});
   }
   stop() { this.running=false;this.ready=false;clearTimeout(this.restartTimer);this.recognition?.abort(); }

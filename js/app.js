@@ -1,26 +1,41 @@
 import {loadQuran, selectedWords} from './quran-data.js';
 import {MushafRenderer} from './mushaf-renderer.js';
 import {requestMicrophone, Microphone} from './microphone.js';
-import {BrowserFastConformerProvider, BrowserStreamingProvider} from './asr-engine.js';
+import {AutomaticASRProvider} from './asr-selection.js';
 import {RecitationEngine} from './recitation-engine.js';
 import {buildReport} from './report-engine.js';
 import {saveReport} from './firebase.js';
 import {downloadManager, formatBytes, formatEta} from './download-manager.js';
 import {TranscriptGate} from './transcript-gate.js';
 import {MicrophoneCalibration} from './calibration.js';
+import {PronunciationProvider} from './pronunciation-provider.js';
 
 const root = document.getElementById('app');
 const debug = new URLSearchParams(location.search).has('debug');
 const debugState = {};
-let data, stream, microphone, provider, engine, renderer, session, report;
+const latencySamples = [];
+let data, stream, microphone, provider, pronunciationProvider, engine, renderer, session, report;
 let calibration, calibrationData, transcriptGate, mode = 'idle';
 let configuredVad = null;
-let providerChoice = 'browser';
 let homeUnsubscribe;
 let modalUnsubscribe;
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const arabic = value => new Intl.NumberFormat('ar').format(value);
 function debugInfo(values) { if (!debug) return; Object.assign(debugState, values); let node = document.querySelector('.debug'); if (!node) { node = document.createElement('pre'); node.className = 'debug'; document.body.append(node); } node.textContent = JSON.stringify(debugState, null, 2); }
+function debugLatency(kind, values) {
+  if (!debug) return;
+  latencySamples.push({kind, ...values}); if (latencySamples.length > 40) latencySamples.shift();
+  const mean = field => {
+    const found = latencySamples.map(sample => sample[field]).filter(Number.isFinite);
+    return found.length ? Math.round(found.reduce((a,b) => a+b,0)/found.length) : null;
+  };
+  debugInfo({latencyLatest:{kind,...values}, latencyAveragesMs:{
+    audioToPartial:mean('audioToPartialMs'), partialToHighlight:mean('partialToHighlightMs'),
+    totalWordDisplayProxy:mean('totalWordDisplayProxyMs'), audioBuffering:mean('audioBufferingMs'),
+    featureExtraction:mean('featureExtractionMs'), asrInference:mean('asrInferenceMs'),
+    stabilization:mean('stabilizationMs'), alignment:mean('alignmentMs'),
+    svgRender:mean('svgRenderMs')}, latencySamples:latencySamples.length});
+}
 function home() {
   homeUnsubscribe?.();
   root.innerHTML = `<section class="screen home"><div class="emblem" aria-hidden="true">۞</div><h1>القرآن الكريم</h1>
@@ -110,16 +125,35 @@ async function setup() {
   root.innerHTML = `<section class="screen setup"><button class="back" id="back-home">رجوع</button><h1>إعداد التسميع</h1>
     <label class="field">السورة<select id="surah">${options}</select></label>
     <div class="range"><label class="field">من آية<select id="from"></select></label><label class="field">إلى آية<select id="to"></select></label></div>
-    <label class="field">طريقة الاستماع<select id="asr-provider">
-      <option value="browser">مباشر عبر خدمة المتصفح</option>
-      <option value="local">محلي — قد يتأخر ظهور الكلمات</option></select></label>
-    <p id="asr-disclosure">الاستماع المباشر قد يرسل صوتك إلى خدمة التعرف التابعة للمتصفح ويتطلب اتصالًا بالإنترنت. بالمتابعة تختار استخدام هذه الخدمة.</p>
-    <div class="spacer"></div><div id="setup-error" class="message" role="alert"></div><button class="primary" id="next">التالي</button></section>`;
-  const providerSelect = document.getElementById('asr-provider');
-  providerSelect.onchange = () => {
-    document.getElementById('asr-disclosure').textContent = providerSelect.value === 'browser'
-      ? 'الاستماع المباشر قد يرسل صوتك إلى خدمة التعرف التابعة للمتصفح ويتطلب اتصالًا بالإنترنت. بالمتابعة تختار استخدام هذه الخدمة.'
-      : 'يبقى الصوت على جهازك. النموذج المحلي الحالي لا يضمن التتبع المباشر منخفض التأخير.';
+    <label class="mic-row" for="mic-enabled"><span><strong>تفعيل الميكروفون</strong><small id="mic-state">غير مفعّل</small></span>
+      <input class="switch" id="mic-enabled" type="checkbox" role="switch" aria-label="تفعيل الميكروفون"></label>
+    <div class="spacer"></div><div id="setup-error" class="message" role="alert"></div><button class="primary" id="next" disabled>التالي</button></section>`;
+  const micSwitch = document.getElementById('mic-enabled'), next = document.getElementById('next');
+  micSwitch.onchange = async () => {
+    next.disabled = true;
+    const state = document.getElementById('mic-state');
+    const error = document.getElementById('setup-error'); error.textContent = '';
+    if (!micSwitch.checked) {
+      stream?.getTracks().forEach(track => track.stop()); stream = null;
+      state.textContent = 'غير مفعّل'; return;
+    }
+    micSwitch.disabled = true; state.textContent = 'جاري التفعيل…';
+    try {
+      stream = await requestMicrophone();
+      if (!micSwitch.isConnected || !micSwitch.checked) {
+        stream.getTracks().forEach(track => track.stop()); stream = null; return;
+      }
+      const track = stream.getAudioTracks()[0];
+      track.onended = () => {
+        if (!micSwitch.isConnected) return;
+        micSwitch.checked = false; next.disabled = true;
+        state.textContent = 'غير مفعّل'; stream = null;
+      };
+      state.textContent = 'الميكروفون مفعّل'; next.disabled = false;
+    } catch (reason) {
+      micSwitch.checked = false; state.textContent = 'غير مفعّل';
+      error.textContent = reason.name === 'NotAllowedError' ? 'يرجى السماح باستخدام الميكروفون' : reason.message;
+    } finally { if (micSwitch.isConnected) micSwitch.disabled = false; }
   };
   const surah = document.getElementById('surah'), from = document.getElementById('from'), to = document.getElementById('to');
   function ayahOptions() {
@@ -130,12 +164,11 @@ async function setup() {
   surah.onchange = ayahOptions; ayahOptions();
   from.onchange = () => { if (+to.value < +from.value) to.value = from.value; };
   to.onchange = () => { if (+to.value < +from.value) to.value = from.value; };
-  document.getElementById('back-home').onclick = home;
+  document.getElementById('back-home').onclick = () => {
+    stream?.getTracks().forEach(track => track.stop()); stream = null; home();
+  };
   document.getElementById('next').onclick = async () => {
-    providerChoice = providerSelect.value;
-    if (providerChoice === 'browser' && !BrowserStreamingProvider.supported) {
-      document.getElementById('setup-error').textContent = 'هذا المتصفح لا يدعم خدمة الاستماع المباشر. استخدم متصفحًا متوافقًا أو اختر الاستماع المحلي.'; return;
-    }
+    if (!micSwitch.checked || !stream?.getAudioTracks().some(track => track.readyState === 'live' && track.enabled)) return;
     const button = document.getElementById('next'); button.disabled = true;
     try { await openCalibration(+surah.value, +from.value, +to.value); }
     catch (error) {
@@ -162,7 +195,7 @@ function updateCalibrationUI(value) {
   document.querySelector('.mic-meter')?.setAttribute('aria-valuenow', String(Math.round(value.meterPercent)));
   if (message.textContent !== value.message) message.textContent = value.message;
   check.hidden = !value.passed;
-  button.disabled = !value.passed;
+  button.disabled = !value.passed || !provider?.ready || !pronunciationProvider?.ready;
   if (value.noiseReady && provider?.ready &&
       (configuredVad === null || Math.abs(value.recommendedVadThreshold-configuredVad)/configuredVad > .15)) {
     configuredVad = value.recommendedVadThreshold;
@@ -173,6 +206,7 @@ function handleAsrMessage(message) {
   if (message.type === 'stage') {
     const stage = document.getElementById('stage'); if (stage) stage.textContent = message.label;
   } else if (message.type === 'hypothesis') {
+    message.partialTranscriptReceivedAt = Date.now();
     if (mode === 'calibration' && message.phase === 'final') {
       updateCalibrationUI(calibration.hear(message.text, message));
     } else if (mode === 'recitation') {
@@ -180,11 +214,25 @@ function handleAsrMessage(message) {
     }
     debugInfo({asrPhase:message.phase, partial:message.text, latency:message.latency,
       acousticScore:message.acousticScore, expected:engine?.expected?.hafs,
-      currentRequiredWordId:engine?.currentRequiredWordId, currentAyah:engine?.currentAyah});
+      currentRequiredWordId:engine?.currentRequiredWordId, currentAyah:engine?.currentAyah,
+      providerLatencyStats:provider?.getLatencyStats?.()});
   } else if (message.type === 'level') {
     if (mode === 'recitation' && message.vadState === 'speech') engine?.heardSpeech();
     if (mode === 'recitation' && message.vadState === 'silence') engine?.silence();
     debugInfo({rms:message.rms, vadState:message.vadState, sampleRate:message.sampleRate});
+  } else if (message.type === 'provider-selected') {
+    debugInfo({selectedASRProvider:message.selected, providerLatencyStats:message.latencyStats});
+    const stage = document.getElementById('stage');
+    if (stage) stage.textContent = 'استمع الآن إلى البسملة';
+    const status = document.getElementById('live-status');
+    if (status) status.textContent = 'الاستماع مباشر';
+  } else if (message.type === 'provider-recovering') {
+    const stage = document.getElementById('stage');
+    if (stage) stage.textContent = 'جاري تجهيز الاستماع…';
+    const status = document.getElementById('live-status');
+    if (status) status.textContent = 'جاري تجهيز الاستماع…';
+  } else if (message.type === 'provider-failed') {
+    debugInfo({failedASRProvider:message.selected, providerFailure:message.reason});
   } else if (message.type === 'error') {
     cleanup().then(() => errorScreen(Error(message.message), setup));
   } else if (message.type === 'recoverable' && debug) console.warn(message.message);
@@ -208,15 +256,27 @@ async function openCalibration(surah, fromAyah, toAyah) {
     </div></section>`;
   document.getElementById('calibration-back').onclick = async () => { await cleanup(); setup(); };
   document.getElementById('calibration-start').onclick = () => begin(surah, fromAyah, toAyah);
-  stream = await requestMicrophone();
+  if (!stream?.getAudioTracks().some(track => track.readyState === 'live' && track.enabled))
+    throw Error('يرجى تفعيل الميكروفون أولًا');
   calibration = new MicrophoneCalibration();
-  microphone = new Microphone(stream, pcm => {
+  microphone = new Microphone(stream, (pcm, timing) => {
     if (mode === 'calibration') updateCalibrationUI(calibration.observe(pcm));
-    if (mode === 'calibration' || mode === 'recitation') provider?.push(pcm);
+    if (mode === 'recitation') pronunciationProvider?.push(pcm,timing.audioFrameReceivedAt ?? Date.now());
+    if (mode === 'calibration' || mode === 'recitation') provider?.push(pcm, timing);
   }, async error => { await cleanup(); errorScreen(error, setup); });
   calibration.deviceSampleRate = await microphone.start();
-  provider = providerChoice === 'browser' ? new BrowserStreamingProvider(handleAsrMessage) : new BrowserFastConformerProvider(handleAsrMessage);
-  await provider.init();
+  provider = new AutomaticASRProvider(handleAsrMessage, {
+    browserOnline:navigator.onLine !== false,
+    localInstalled:downloadManager.state === 'installed',
+    deviceMemory:navigator.deviceMemory || null,
+    cores:navigator.hardwareConcurrency || null,
+    wordTimingRequired:true
+  });
+  pronunciationProvider = new PronunciationProvider(stage =>
+    debugInfo({pronunciationModelStage:stage}));
+  provider.setCalibrationMode(true);
+  await Promise.all([provider.init(),pronunciationProvider.init()]);
+  if (mode !== 'calibration' || !provider?.ready) return;
   provider.configure({vadThreshold:calibration.recommendedVadThreshold});
   configuredVad = calibration.recommendedVadThreshold;
   provider.start();
@@ -237,8 +297,10 @@ function diagnoseCenter() {
   });
 }
 async function begin(surah, fromAyah, toAyah) {
-  if (!calibration?.passed || !provider?.ready || !stream?.getAudioTracks().some(t => t.readyState === 'live')) return;
+  if (!calibration?.passed || !provider?.ready || !pronunciationProvider?.ready ||
+      !stream?.getAudioTracks().some(t => t.readyState === 'live')) return;
   calibrationData = calibration.snapshot();
+  latencySamples.length = 0;
   mode = 'preparing'; report = null;
   session = {id:crypto.randomUUID(), surah, fromAyah, toAyah, calibration:{
     noiseFloorDb:calibrationData.noiseFloorDb, normalSpeechRms:calibrationData.speechRms,
@@ -246,34 +308,106 @@ async function begin(surah, fromAyah, toAyah) {
     deviceSampleRate:calibrationData.deviceSampleRate}};
   sessionStorage.setItem('interrupted', JSON.stringify(session));
   root.innerHTML = '<section class="screen loading"><div class="spinner"></div><h1>جاري تجهيز المصحف</h1></section>';
-  const words = selectedWords(data.index, surah, fromAyah, toAyah);
+  const words = selectedWords(data.index, surah, fromAyah, toAyah, data.pronunciationMap);
   if (!words.length) return errorScreen(Error('لم تُعثر كلمات الآيات المختارة'), setup);
   try {
     const firstPage = words[0].page;
     renderer = new MushafRenderer(document.createElement('div'));
     await renderer.preload(firstPage);
-    root.innerHTML = `<section class="screen recite"><div class="recite-header"><button id="exit" aria-label="إنهاء التسميع">خروج</button><button id="finish-recitation" hidden>النتيجة</button><span id="page-number"></span></div><div class="page-shell"><div id="mushaf" class="mushaf-page" aria-label="صفحة المصحف"></div></div><div class="live-bar"><span class="live-dot" aria-hidden="true"></span><span id="live-status">${providerChoice === 'browser' ? 'الاستماع مباشر' : 'الاستماع محلي — قد يتأخر التتبع'}</span></div></section>`;
+    root.innerHTML = `<section class="screen recite"><div class="recite-header"><button id="exit" aria-label="إنهاء التسميع">خروج</button><button id="finish-recitation" hidden>النتيجة</button><span id="page-number"></span></div><div class="page-shell"><div id="mushaf" class="mushaf-page" aria-label="صفحة المصحف"></div></div><div class="live-bar"><span class="live-dot" aria-hidden="true"></span><span id="live-status">الاستماع مباشر</span></div></section>`;
     renderer = new MushafRenderer(document.getElementById('mushaf'), page => {
       const number = document.getElementById('page-number');
       if (number) number.textContent = `صفحة ${arabic(page)}`;
       diagnoseCenter();
     });
+    let svgWordUpdatedAt = null, svgRenderMs = null;
+    const visuallyShown = new Set();
+    const lastWordTiming = new Map();
     engine = new RecitationEngine(words, (word, active) => {
+      const renderStart = performance.now();
       renderer.update(word, active);
-      if (word.state === 'correct') { const status = document.getElementById('live-status'); if (status) status.textContent = (providerChoice === 'browser' ? 'الاستماع مباشر' : 'الاستماع محلي — قد يتأخر التتبع'); }
+      svgRenderMs = performance.now() - renderStart; svgWordUpdatedAt = Date.now();
+      if (word.state === 'correct' || word.state === 'lexical-only') {
+        const status = document.getElementById('live-status');
+        if (status) status.textContent = word.state === 'correct' ? 'الاستماع مباشر' : 'تمت مطابقة الكلمة؛ النطق غير متحقق منه';
+      }
     }, page => renderer.show(page, words).catch(error => errorScreen(error, () => renderer.show(page, words))),
-    () => { document.getElementById('finish-recitation').hidden = false; }, () => { const status = document.getElementById('live-status'); if (status) status.textContent = 'لم يتضح الصوت، أعد الكلمة الحالية'; });
-    transcriptGate = new TranscriptGate((tokens, meta) => {
-      const consumed = engine?.acceptCommitted(tokens, meta);
-      const uiUpdatedAt = Date.now();
-      debugInfo({audioChunkReceivedAt:meta.audioChunkReceivedAt,
-        asrInferenceStartedAt:meta.asrInferenceStartedAt, partialHypothesisAt:meta.partialHypothesisAt,
-        wordStabilizedAt:meta.wordStabilizedAt, uiUpdatedAt,
-        audioToPartialMs:meta.audioChunkReceivedAt == null ? null : meta.partialHypothesisAt-meta.audioChunkReceivedAt,
-        partialToUiMs:uiUpdatedAt-meta.partialHypothesisAt,
-        totalPipelineMs:meta.audioChunkReceivedAt == null ? null : uiUpdatedAt-meta.audioChunkReceivedAt,
-        currentSpokenWordId:engine?.currentSpokenWordId, primaryCursor:engine?.primaryCursor,
-        highlightCursor:engine?.highlightCursor});
+    () => { document.getElementById('finish-recitation').hidden = false; }, () => { const status = document.getElementById('live-status'); if (status) status.textContent = 'لم يتضح الصوت، أعد الكلمة الحالية'; },
+    (word, visible) => {
+      const renderStart = performance.now();
+      if (visible) renderer.previewWord(word.key);
+      else renderer.clearPreviewWord(word.key);
+      svgRenderMs = performance.now() - renderStart; svgWordUpdatedAt = Date.now();
+    });
+    transcriptGate = new TranscriptGate(async (tokens, meta) => {
+      const alignmentStartedAt = Date.now();
+      const beforeIds = new Set(engine.committedQuranWords);
+      const expectedBefore = engine.expected;
+      const positionBefore = engine.position;
+      let pronunciationEvidence = null;
+      if (expectedBefore && engine.matchingSpan(tokens[0]) &&
+          expectedBefore.pronunciation?.phonemeSequence &&
+          expectedBefore.pronunciation.acousticSpan === engine.matchingSpan(tokens[0])) {
+        const previous = lastWordTiming.get(meta.segmentId);
+        const context = previous?.tokenOffset === meta.tokenOffset-1 &&
+          previous?.position === positionBefore-1 ? previous : null;
+        try { pronunciationEvidence = await pronunciationProvider.verify(expectedBefore,meta,context); }
+        catch (error) { pronunciationEvidence={source:'quran-phoneme-ctc',
+          expected:expectedBefore.pronunciation.phonemeSequence,decision:'uncertain',
+          reason:error.message,phonemeConfidence:0}; }
+      }
+      const consumed = engine?.acceptCommitted(tokens, {...meta,pronunciationEvidence});
+      if (engine.position > positionBefore && Number.isFinite(meta.wordStartAt))
+        lastWordTiming.set(meta.segmentId,{tokenOffset:meta.tokenOffset,
+          position:engine.position-1,startAt:meta.wordStartAt,
+          phonemes:expectedBefore?.pronunciation?.phonemeSequence});
+      if (debug) debugInfo({lexicalExpected:expectedBefore?.pronunciation?.lexicalNormalized,
+        lexicalASR:tokens[0], lexicalMatch:tokens[0] === expectedBefore?.pronunciation?.lexicalNormalized,
+        expectedPronunciation:expectedBefore?.pronunciation?.pronunciationRepresentation,
+        harakahDecision:pronunciationEvidence?.decision || 'uncertain',
+        harakahScore:pronunciationEvidence?.vowels?.at(-1)?.expectedProbability ?? null,
+        finalVowelScore:pronunciationEvidence?.finalVowelScore ?? null,
+        phonemeConfidence:pronunciationEvidence?.phonemeConfidence ?? null,
+        pronunciationScore:pronunciationEvidence?.pronunciationScore ?? null});
+      const quranAlignmentCompletedAt = Date.now();
+      debugLatency('commit', {
+        audioFrameReceivedAt:meta.audioFrameReceivedAt ?? null,
+        audioChunkReadyAt:meta.audioChunkReadyAt ?? null,
+        featureExtractionStartedAt:meta.featureExtractionStartedAt ?? null,
+        featureExtractionEndedAt:meta.featureExtractionEndedAt ?? null,
+        asrInferenceStartedAt:meta.asrInferenceStartedAt ?? null,
+        asrInferenceEndedAt:meta.asrInferenceEndedAt ?? null,
+        partialTranscriptReceivedAt:meta.partialTranscriptReceivedAt ?? null,
+        quranAlignmentCompletedAt, svgWordUpdatedAt,
+        audioBufferingMs:meta.audioBufferingMs ?? null,
+        asrInferenceMs:meta.asrInferenceEndedAt == null ? null : meta.asrInferenceEndedAt-meta.asrInferenceStartedAt,
+        stabilizationMs:meta.wordStabilizedAt-(meta.firstPartialTranscriptReceivedAt ?? meta.wordStabilizedAt),
+        alignmentMs:quranAlignmentCompletedAt-alignmentStartedAt, svgRenderMs,
+        currentSpokenWordId:engine?.currentSpokenWordId,
+        primaryCursor:engine?.primaryCursor, highlightCursor:engine?.highlightCursor});
+      for (const id of engine.committedQuranWords) {
+        if (beforeIds.has(id) || visuallyShown.has(id)) continue;
+        visuallyShown.add(id);
+        debugLatency('highlight', {
+          wordId:id, audioFrameReceivedAt:meta.audioFrameReceivedAt ?? null,
+          audioChunkReadyAt:meta.audioChunkReadyAt ?? null,
+          featureExtractionStartedAt:meta.featureExtractionStartedAt ?? null,
+          featureExtractionEndedAt:meta.featureExtractionEndedAt ?? null,
+          asrInferenceStartedAt:meta.asrInferenceStartedAt ?? null,
+          asrInferenceEndedAt:meta.asrInferenceEndedAt ?? null,
+          partialTranscriptReceivedAt:meta.partialTranscriptReceivedAt ?? null,
+          quranAlignmentCompletedAt, svgWordUpdatedAt,
+          audioBufferingMs:meta.audioBufferingMs ?? null,
+          featureExtractionMs:meta.featureExtractionEndedAt == null ? null : meta.featureExtractionEndedAt-meta.featureExtractionStartedAt,
+          asrInferenceMs:meta.asrInferenceEndedAt == null ? null : meta.asrInferenceEndedAt-meta.asrInferenceStartedAt,
+          audioToPartialMs:meta.audioFrameReceivedAt == null ? null :
+            (meta.audioBufferingMs || 0)+meta.partialTranscriptReceivedAt-meta.audioFrameReceivedAt,
+          partialToHighlightMs:svgWordUpdatedAt-meta.partialTranscriptReceivedAt,
+          alignmentMs:quranAlignmentCompletedAt-alignmentStartedAt, svgRenderMs,
+          totalWordDisplayProxyMs:meta.audioFrameReceivedAt == null ? null :
+            (meta.audioBufferingMs || 0)+svgWordUpdatedAt-meta.audioFrameReceivedAt,
+          currentSpokenWordId:engine.currentSpokenWordId});
+      }
       return consumed;
     }, (stable, message) => {
       const history = [...(debugState.partialStream || []),
@@ -281,18 +415,48 @@ async function begin(surah, fromAyah, toAyah) {
           EXPECTED:engine?.expected?.hafs, CURRENT_WORD:engine?.currentSpokenWordId}].slice(-20);
       debugInfo({rawPartialTranscript:message.text, stabilizedPartialTranscript:stable.join(' '),
         partialStream:history, backlogMs:message.backlogMs, encoderMode:message.encoderMode});
+    }, (tokens, message) => {
+      if (!tokens.length) return;
+      const before = engine?.previewIndex;
+      const alignmentStartedAt = Date.now();
+      const preview = engine?.previewPartial(tokens, message);
+      const quranAlignmentCompletedAt = Date.now();
+      if (!preview || before === engine.previewIndex || visuallyShown.has(preview.key)) return;
+      visuallyShown.add(preview.key);
+      debugLatency('highlight', {
+        wordId:preview.key, audioFrameReceivedAt:message.audioFrameReceivedAt ?? null,
+        audioChunkReadyAt:message.audioChunkReadyAt ?? null,
+        featureExtractionStartedAt:message.featureExtractionStartedAt ?? null,
+        featureExtractionEndedAt:message.featureExtractionEndedAt ?? null,
+        asrInferenceStartedAt:message.asrInferenceStartedAt ?? null,
+        asrInferenceEndedAt:message.asrInferenceEndedAt ?? null,
+        partialTranscriptReceivedAt:message.partialTranscriptReceivedAt,
+        quranAlignmentCompletedAt, svgWordUpdatedAt,
+        audioBufferingMs:message.audioBufferingMs ?? null,
+        featureExtractionMs:message.featureExtractionEndedAt == null ? null : message.featureExtractionEndedAt-message.featureExtractionStartedAt,
+        asrInferenceMs:message.asrInferenceEndedAt == null ? null : message.asrInferenceEndedAt-message.asrInferenceStartedAt,
+        audioToPartialMs:message.audioFrameReceivedAt == null ? null :
+          (message.audioBufferingMs || 0)+message.partialTranscriptReceivedAt-message.audioFrameReceivedAt,
+        partialToHighlightMs:svgWordUpdatedAt-message.partialTranscriptReceivedAt,
+        alignmentMs:quranAlignmentCompletedAt-alignmentStartedAt, svgRenderMs,
+        totalWordDisplayProxyMs:message.audioFrameReceivedAt == null ? null :
+          (message.audioBufferingMs || 0)+svgWordUpdatedAt-message.audioFrameReceivedAt,
+        currentSpokenWordId:engine.currentSpokenWordId});
     });
     await renderer.show(firstPage, words);
     document.getElementById('finish-recitation').onclick = finish;
     document.getElementById('exit').onclick = async () => { await cleanup(); sessionStorage.removeItem('interrupted'); home(); };
+    provider.setCalibrationMode(false);
     provider.reset(); provider.configure({vadThreshold:calibrationData.recommendedVadThreshold});
+    pronunciationProvider.clear();
     calibration = null; mode = 'recitation';
     debugInfo({model:'ready', expected:engine.expected.hafs, page:firstPage,
       noiseFloorDb:calibrationData.noiseFloorDb, vadThreshold:calibrationData.recommendedVadThreshold});
   } catch(error) { await cleanup(); errorScreen(error, setup); }
 }
 async function cleanup() {
-  mode = 'idle'; provider?.stop(); provider = null; transcriptGate = null;
+  mode = 'idle'; provider?.stop(); provider = null;
+  pronunciationProvider?.stop();pronunciationProvider=null;transcriptGate = null;
   await microphone?.stop(); microphone = null;
   stream?.getTracks().forEach(track => track.stop()); stream = null;
   calibration = null;
@@ -308,10 +472,11 @@ async function finish() {
 function showReport() {
   if (!report) return home();
   const stats = [
-    ['إجمالي الكلمات', report.totals.words],['الكلمات الصحيحة', report.totals.correctWords],
+    ['إجمالي الكلمات', report.totals.words],['الكلمات الصحيحة بعد فحص النطق', report.totals.correctWords],
+    ['مطابقة كلمة دون تحقق النطق', report.totals.pronunciationUnverified],
     ['صحيحة من أول محاولة', report.totals.correctFirstAttempt],
     ['الكلمات التي احتاجت إلى تكرار', report.totals.requiredRepetition],['الأخطاء المؤكدة', report.totals.errors],
-    ['الكلمات المتجاوزة', report.totals.skipped],
+    ['أخطاء الحركة', report.totals.harakahErrors],['الكلمات المتجاوزة', report.totals.skipped],
     ['كُشفت بعد ثلاث محاولات', report.totals.revealedAfterThreeErrors],['مرات التكرار', report.totals.repetitions],
     ['التوقف الطويل', report.totals.longPauses],['نسبة الإتمام', `${report.totals.completion}٪`]
   ];
@@ -320,7 +485,9 @@ function showReport() {
     <div class="mistake-list">${verse.words.flatMap(w => w.errors.map(e => `${escapeHTML(w.hafs)}: ${escapeHTML(e.type)}${e.spoken ? `، سُمعت «${escapeHTML(e.spoken)}»` : ''}`)).join('<br>')}</div></article>`).join('');
   root.innerHTML = `<section class="screen report"><button class="back" id="report-home">الرئيسية</button><h1>تقرير التسميع</h1>
     <div class="summary"><div class="summary-title">${escapeHTML(data.surahs[session.surah].name)} · من آية ${arabic(session.fromAyah)} إلى ${arabic(session.toAyah)}</div>
-    <div>مدة التسميع: ${arabic(Math.round(report.durationMs/1000))} ثانية</div><div class="stats">${stats.map(([label,value]) => `<div class="stat"><b>${escapeHTML(value)}</b><span>${label}</span></div>`).join('')}</div></div>
+    <div>مدة التسميع: ${arabic(Math.round(report.durationMs/1000))} ثانية</div>
+    <p>اللون الذهبي يعني مطابقة الكلمة نصيًا دون تحقق صوتي من الحركات، ولا تُحتسب ضمن الكلمات الصحيحة بعد فحص النطق.</p>
+    <div class="stats">${stats.map(([label,value]) => `<div class="stat"><b>${escapeHTML(value)}</b><span>${label}</span></div>`).join('')}</div></div>
     <h2>تفصيل الآيات</h2>${verses}</section>`;
   document.getElementById('report-home').onclick = () => { report = null; home(); };
 }

@@ -22,16 +22,21 @@ try {
   const r=new MushafRenderer(document.querySelector('#mushaf'));await r.show(1,words);
   const original=document.querySelector('svg');const first=r.nodes.get(words[0].key), second=r.nodes.get(words[1].key);
   const hiddenInitially=getComputedStyle(first).visibility==='hidden';
+  r.previewWord(words[0].key);
+  const previewVisible=getComputedStyle(first).visibility==='visible' && document.querySelectorAll('.active').length===1;
+  r.clearPreviewWord(words[0].key);
+  const previewRetracted=getComputedStyle(first).visibility==='hidden';
   words[0].revealed=true;words[0].state='correct';r.update(words[0],true);
   words[1].state='incorrect-placeholder';r.update(words[0],false);r.update(words[1]);
   const errorHidden=getComputedStyle(second).visibility==='hidden'&&document.querySelectorAll('.error').length===1;
   words[1].revealed=true;words[1].revealedByErrorLimit=true;r.update(words[1],true);
   await r.show(1,words);
-  return {hiddenInitially,errorHidden,sameSvg:original===document.querySelector('svg'),
+  return {hiddenInitially,previewVisible,previewRetracted,errorHidden,sameSvg:original===document.querySelector('svg'),
    visible:getComputedStyle(first).visibility==='visible'&&getComputedStyle(second).visibility==='visible',
    active:document.querySelectorAll('.active').length,permanent:document.querySelectorAll('.revealed-error').length,
    cachedBoxes:r.boxes.size};
  });
- assert.deepEqual(result,{hiddenInitially:true,errorHidden:true,sameSvg:true,visible:true,active:1,permanent:1,cachedBoxes:2});
+ assert.deepEqual(result,{hiddenInitially:true,previewVisible:true,previewRetracted:true,
+  errorHidden:true,sameSvg:true,visible:true,active:1,permanent:1,cachedBoxes:2});
  console.log('PASS: real Chromium SVG visibility, error concealment, cached geometry, active and permanent overlays, no page rebuild');
 } finally {await browser.close();server.close();}

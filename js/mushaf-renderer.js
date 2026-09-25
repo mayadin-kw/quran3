@@ -117,7 +117,8 @@ export class MushafRenderer {
     if (this.activeWordId && this.activeWordId !== wordId) this.clearActiveWord(this.activeWordId);
     this.activeWordId = wordId;
     const group = this.nodes.get(wordId);
-    if (group && !group.classList.contains('is-hidden')) this.overlay(group, 'active');
+    if (group && (!group.classList.contains('is-hidden') || group.classList.contains('is-preview')))
+      this.overlay(group, 'active');
   }
   clearActiveWord(wordId = this.activeWordId) {
     const group = this.nodes.get(wordId);
@@ -125,6 +126,15 @@ export class MushafRenderer {
     if (wordId === this.activeWordId) this.activeWordId = null;
   }
   revealWord(wordId) { this.nodes.get(wordId)?.classList.remove('is-hidden'); }
+  previewWord(wordId) {
+    const group = this.nodes.get(wordId); if (!group) return;
+    group.classList.add('is-preview'); this.setActiveWord(wordId);
+  }
+  clearPreviewWord(wordId) {
+    const group = this.nodes.get(wordId); if (!group) return;
+    group.classList.remove('is-preview');
+    if (group.classList.contains('is-hidden')) this.clearActiveWord(wordId);
+  }
   showWordError(wordId) { const group = this.nodes.get(wordId); if (group) this.overlay(group, 'error'); }
   clearWordError(wordId) { const group = this.nodes.get(wordId); if (group) this.removeOverlay(group, 'error'); }
   revealWordAfterFailures(wordId) {
@@ -136,10 +146,12 @@ export class MushafRenderer {
     if (active) this.setActiveWord(word.key);
     else if (this.activeWordId === word.key) this.clearActiveWord(word.key);
     const group = this.nodes.get(word.key); if (!group) return;
-    if (word.revealed) this.revealWord(word.key);
+    if (word.revealed) { this.revealWord(word.key); group.classList.remove('is-preview'); }
     if (word.revealedByErrorLimit) this.revealWordAfterFailures(word.key);
     else if (word.state === 'incorrect-placeholder') this.showWordError(word.key);
     else this.clearWordError(word.key);
+    if (word.state === 'lexical-only') this.overlay(group, 'pronunciation-unverified');
+    else this.removeOverlay(group, 'pronunciation-unverified');
     if (active) this.setActiveWord(word.key);
   }
 }

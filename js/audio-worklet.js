@@ -13,7 +13,7 @@ class QuranCapture extends AudioWorkletProcessor {
       this.previous = value;
     }
     this.position -= input.length;
-    if (this.output.length >= 2048) {
+    if (this.output.length >= 1024) {
       const pcm = Float32Array.from(this.output); this.output.length = 0;
       this.port.postMessage({ pcm }, [pcm.buffer]);
     }

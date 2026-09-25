@@ -14,11 +14,16 @@ async function initialize() {
   ort.env.wasm.numThreads = 1;
   scorer = await import('./phoneme-scoring.js');
   self.postMessage({type:'stage',stage:'assets'});
-  const [modelBytes, vocabBytes] = await Promise.all([
-    cached('quran-phoneme.int8.onnx'), cached('quran-phoneme-vocab.json')]);
+  const [modelParts, vocabBytes] = await Promise.all([
+    Promise.all(Array.from({length:4},(_,index)=>
+      cached(`quran-phoneme.int8.onnx.part${index+1}`))),
+    cached('quran-phoneme-vocab.json')]);
   vocabulary = JSON.parse(new TextDecoder().decode(vocabBytes));
   self.postMessage({type:'stage',stage:'model'});
-  model = await ort.InferenceSession.create(new Uint8Array(modelBytes),
+  const modelBytes=new Uint8Array(modelParts.reduce((sum,part)=>sum+part.byteLength,0));
+  let offset=0;
+  for(const part of modelParts){modelBytes.set(new Uint8Array(part),offset);offset+=part.byteLength;}
+  model = await ort.InferenceSession.create(modelBytes,
     {executionProviders:['wasm'],graphOptimizationLevel:'disabled'});
   self.postMessage({type:'ready'});
 }

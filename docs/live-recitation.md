@@ -142,3 +142,10 @@ correct pronunciations. Completion percentage means passage progress; the separa
 `tests/renderer.browser.mjs`. After editing deployable assets, run
 `python3 scripts/update-manifest.py` so hashes and sizes match the current files.
 Hosting or deployment was not requested.
+
+The quantized ONNX file is stored as four `.partN` files, each below GitHub's 25 MiB
+browser upload limit. The pronunciation worker joins them from the verified app cache
+before opening ONNX Runtime. To recreate them after exporting a new model, run
+`python3 scripts/split-phoneme-model.py /path/to/quran-phoneme.int8.onnx`, copy the
+four parts into `assets/models`, then remove the original large ONNX file and refresh
+the manifest.

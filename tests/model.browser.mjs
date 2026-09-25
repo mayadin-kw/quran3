@@ -21,7 +21,9 @@ try{
  await page.goto(`http://127.0.0.1:${server.address().port}`);
  const result=await page.evaluate(async()=>{
   const cache=await caches.open('recitation-core');
-  for(const name of ['decoder.int8.onnx','tokens.txt','quran-phoneme.int8.onnx','quran-phoneme-vocab.json'])
+  for(const name of ['decoder.int8.onnx','tokens.txt','quran-phoneme.int8.onnx.part1',
+    'quran-phoneme.int8.onnx.part2','quran-phoneme.int8.onnx.part3',
+    'quran-phoneme.int8.onnx.part4','quran-phoneme-vocab.json'])
     await cache.put(`assets/models/${name}`,await fetch(`assets/models/${name}`));
   await cache.put('https://huggingface.co/voidwaveDev/fastconformer-quran/resolve/9dd2fd999fed6b38fbf251343cbd9a8f5253c810/encoder.int8.onnx?download=true',await fetch('/fixture/encoder.int8.onnx'));
   const [{BrowserFastConformerProvider},{TranscriptGate},{RecitationEngine},

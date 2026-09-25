@@ -26,7 +26,8 @@ try{
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   const results=await page.evaluate(async()=>{
     const cache=await caches.open('recitation-core');
-    for(const name of ['quran-phoneme.int8.onnx','quran-phoneme-vocab.json'])
+    for(const name of ['quran-phoneme.int8.onnx.part1','quran-phoneme.int8.onnx.part2',
+      'quran-phoneme.int8.onnx.part3','quran-phoneme.int8.onnx.part4','quran-phoneme-vocab.json'])
       await cache.put(`assets/models/${name}`,await fetch(`assets/models/${name}`));
     const worker=new Worker('js/phoneme-worker.js');
     let next=0;const pending=new Map();
